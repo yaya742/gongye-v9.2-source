@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>页面不存在 · 共页</title>
+<meta name="robots" content="noindex">
+<style>
+  body{margin:0;background:#F6F7F5;color:#202A25;font:15px/1.75 "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+  main{max-width:520px;padding:32px 24px;text-align:center}
+  h1{font-size:22px;margin:0 0 8px}
+  p{color:#57645D;margin:0 0 20px}
+  a{display:inline-block;background:#285E4B;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px}
+  a:hover{background:#1F4C3C}
+</style>
+</head>
+<body>
+<main>
+  <h1>这个地址没有内容</h1>
+  <p>共页是单页应用，页面地址用 # 后面的路径表示。下面这个按钮会回到找资料首页。</p>
+  <a id="back" href="./#/">回到共页首页</a>
+</main>
+<script>
+  // 尽量保留原始路径，交给前端路由决定是否显示 404
+  (function () {
+    var path = location.pathname.replace(/\/index\.html$/, '');
+    var base = document.getElementById('back');
+    if (path && path !== '/' && !/\/[^/]+\.[a-z0-9]+$/i.test(path)) {
+      base.href = './#' + path + (location.search || '');
+    }
+  })();
+</script>
+</body>
+</html>

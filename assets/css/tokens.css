@@ -1,0 +1,72 @@
+/* 共页 v2.3 · 暖色圆润卡片主题
+ * 数值来源：gongye-visual-update/design/design-tokens.json
+ * 变量名保持与旧版一致，组件通过语义变量自动换肤；新增形状与动效变量。
+ */
+:root {
+  color-scheme: light;
+
+  /* 颜色 */
+  --canvas: #FFFAF5;
+  --surface: #FFFFFF;
+  --surface-soft: #FFF0E6;
+  --surface-pink: #FFF1F0;
+  --text: #3C302B;
+  --secondary: #746259;
+  --muted: #7C6A60;
+  --line: #F0E3DC;
+  --control-border: #A68C7C;
+  --brand: #BD513C;
+  --brand-hover: #A84230;
+  --brand-soft: #FFF0E6;
+  --on-brand: #FFFFFF;
+  --appreciation: #8C493C;
+  --accent-ink: #8C493C;
+  --appreciation-soft: #FFF1F0;
+  --danger: #B42318;
+  --success: #216546;
+  --scrim: rgba(255, 247, 241, 0.76);
+
+  /* 形状 */
+  --radius: 24px;
+  --radius-card-mobile: 22px;
+  --radius-detail: 28px;
+  --radius-detail-mobile: 26px;
+  --radius-input: 16px;
+  --radius-button: 14px;
+  --radius-media: 16px;
+  --radius-tag: 8px;
+
+  /* 间距 */
+  --gap-card: 20px;
+  --gap-card-mobile: 14px;
+  --pad-card: 24px;
+  --pad-card-mobile: 18px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* 阴影 */
+  --shadow-idle: 0 4px 16px rgba(110, 70, 45, 0.055);
+  --shadow-raised: 0 14px 34px rgba(110, 70, 45, 0.13);
+  --shadow-modal: 0 24px 60px rgba(110, 70, 45, 0.18);
+
+  /* 动效 */
+  --ease-brand: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-hover: 180ms;
+  --dur-hover-out: 160ms;
+  --dur-press: 90ms;
+  --dur-detail-open: 320ms;
+  --dur-detail-close: 260ms;
+  --dur-menu: 160ms;
+  --dur-tabs: 180ms;
+  --dur-list: 180ms;
+  --dur-reply: 200ms;
+  --dur-route: 180ms;
+
+  --font: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  font: 15px/1.75 var(--font);
+}
+

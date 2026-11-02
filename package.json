@@ -1,0 +1,18 @@
+{
+  "name": "gongye-web",
+  "version": "9.2.0",
+  "private": true,
+  "type": "module",
+  "description": "共页 v9.2：找资料 + 课友圈（静态前端 + 内部试用后端）",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "node scripts/serve.mjs",
+    "serve": "node scripts/serve.mjs",
+    "pilot": "node server/index.mjs",
+    "test": "node tests/logic.test.mjs && node tests/render.test.mjs && node tests/boot.test.mjs && node tests/pilot.test.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

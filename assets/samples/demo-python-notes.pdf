@@ -1,0 +1,72 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 619 >>
+stream
+BT
+/F1 16 Tf
+72 770 Td
+( Python programming - notes \(demo placeholder\) ) Tj
+ET
+BT
+/F1 11 Tf
+72 730 Td
+(Gongye demo sample - NOT a real course note.) Tj
+ET
+BT
+/F1 11 Tf
+72 708 Td
+(This placeholder PDF exists so the static demo can exercise) Tj
+ET
+BT
+/F1 11 Tf
+72 686 Td
+(the download button and the scan/ready state machine.) Tj
+ET
+BT
+/F1 11 Tf
+72 664 Td
+(Category: notes / review sheet / problem set.) Tj
+ET
+BT
+/F1 11 Tf
+72 642 Td
+(Replace it with a real upload backend before production.) Tj
+ET
+BT
+/F1 11 Tf
+72 620 Td
+() Tj
+ET
+BT
+/F1 11 Tf
+72 598 Td
+(Demo-static build: no server, no storage, no scan service.) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000317 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+987
+%%EOF

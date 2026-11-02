@@ -1,0 +1,5 @@
+# 试用名单示例（复制为 allowlist.txt 后填写）
+# 一行一个邮箱；以 @ 开头表示允许整个域名；# 开头为注释。
+# 例：
+# teammate@example.com
+# @example.com

@@ -1,0 +1,73 @@
+# 共页静态站 · Nginx 参考配置
+# 适合「自己的服务器 / 已有 Nginx」的部署方式。证书用 certbot 生成。
+# 注意：location 里再用 add_header 会覆盖 server 级的安全头，所以下面只用
+# expires 控制缓存，把安全头统一留在 server 级。
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name gongye.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name gongye.example.com;
+
+    # certbot --nginx -d gongye.example.com 会自动生成这两行
+    ssl_certificate     /etc/letsencrypt/live/gongye.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gongye.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+
+    root /var/www/gongye;
+    index index.html;
+    charset utf-8;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'" always;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/css text/javascript application/javascript application/json image/svg+xml;
+
+    # 入口 HTML 不缓存，保证发版后立刻生效
+    location = /index.html {
+        expires -1;
+        try_files $uri =404;
+    }
+
+    # 代码与样式：短缓存 + 允许重新验证
+    location /src/ {
+        expires 5m;
+        try_files $uri =404;
+    }
+
+    # 图片 / 图标 / 示例 PDF：可以缓存一周
+    location /assets/ {
+        expires 7d;
+        try_files $uri =404;
+    }
+
+    # 深链接回退：/resources/r_xxx 这类路径交给前端路由
+    location / {
+        expires -1;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 可选：给 /docs/ 加访问限制（部署交接与测试脚本不需要公开）
+    location /docs/ {
+        return 404;
+    }
+    location /scripts/ {
+        return 404;
+    }
+    location /tests/ {
+        return 404;
+    }
+}
