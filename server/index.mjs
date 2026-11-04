@@ -13,6 +13,10 @@
  *   ALLOWED_ORIGINS 允许跨域访问的完整来源（逗号分隔）；默认仅同源
  *   DATA_FILE       数据文件路径，默认 server/data/db.json
  *   COOKIE_SECURE   1 表示 Cookie 只走 HTTPS（本机 http 试用请保持 0）
+ *   TRUST_PROXY     1 表示反向代理会覆盖 X-Forwarded-For，匿名请求按真实客户端 IP 限流
+ *   CLAMD_HOST / CLAMD_PORT / CLAMD_SOCKET  ClamAV 扫描服务地址；配置后每个上传文件都要扫描通过
+ *
+ * 上传文件保存在数据文件同目录的 files/，每小时一份数据快照在 backups/。
  */
 
 import os from 'node:os';
@@ -36,7 +40,8 @@ const dataFile = process.env.DATA_FILE || path.join(HERE, 'data', 'db.json');
  * 内容示例：
  *   { "requireCloudAuth": true,
  *     "adminEmails": ["admin@example.com"],
- *     "cloud": { "endpoint": "https://xxx.app.workbuddy.host", "publishableKey": "wbpk_..." } }
+ *     "cloud": { "endpoint": "https://xxx.app.workbuddy.host", "publishableKey": "wbpk_..." },
+ *     "legal": { "operator": "运营方名称", "contact": "联系邮箱", "effectiveDate": "2026-12-01", "dataLocation": "服务器所在地" } }
  */
 const configPath = path.join(HERE, 'pilot.config.json');
 let fileConfig = {};
@@ -54,7 +59,8 @@ const pilot = await createPilotServer({
   adminEmail: ADMIN_EMAIL || fileConfig.adminEmail || '',
   adminEmails: Array.isArray(fileConfig.adminEmails) ? fileConfig.adminEmails : [],
   requireCloudAuth: fileConfig.requireCloudAuth === true,
-  cloud: fileConfig.cloud && fileConfig.cloud.endpoint ? fileConfig.cloud : null
+  cloud: fileConfig.cloud && fileConfig.cloud.endpoint ? fileConfig.cloud : null,
+  legal: fileConfig.legal && typeof fileConfig.legal === 'object' ? fileConfig.legal : null
 });
 
 const address = await pilot.listen(PORT, HOST);
@@ -89,6 +95,7 @@ if (ADMIN_EMAIL) console.log(`  管理员邮箱：${ADMIN_EMAIL}`);
 else if (Array.isArray(fileConfig.adminEmails) && fileConfig.adminEmails.length) {
   console.log(`  管理员邮箱：${fileConfig.adminEmails.join(', ')}`);
 } else console.log('  提示：用 ADMIN_EMAIL=你的邮箱 启动，可让该账号成为管理员');
+console.log(`  病毒扫描：${process.env.CLAMD_HOST || process.env.CLAMD_SOCKET ? '已开启（ClamAV）' : '未开启（设置 CLAMD_HOST 或 CLAMD_SOCKET）'}`);
 if (pilot.corsPolicy.allowedOrigins.length) {
   console.log(`  跨域来源：仅同源 + ${pilot.corsPolicy.allowedOrigins.join(', ')}`);
 } else {

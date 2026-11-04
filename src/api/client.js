@@ -63,6 +63,62 @@ async function request(pathname, options = {}) {
   return data;
 }
 
+/* 文件上传与下载：上传用 XHR 以拿到进度；下载用 fetch，跨域部署时同样能带上令牌 */
+function authHeaders() {
+  const token = auth.get();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+async function readError(response) {
+  const data = await response.json().catch(() => null);
+  return new Error((data && data.error && data.error.message) || `请求失败（${response.status}）`);
+}
+
+export const files = {
+  upload(file, kind, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${BASE}/api/files?kind=${kind}`);
+      xhr.withCredentials = true;
+      xhr.timeout = 10 * 60 * 1000;
+      xhr.setRequestHeader('x-requested-with', 'gongye');
+      xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name || ''));
+      xhr.setRequestHeader('content-type', file.type || 'application/octet-stream');
+      Object.entries(authHeaders()).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+      if (onProgress) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(event.loaded / event.total);
+        };
+      }
+      xhr.onload = () => {
+        let data = null;
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          data = null;
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.file) resolve(data);
+        else reject(new Error((data && data.error && data.error.message) || `上传失败（${xhr.status}）`));
+      };
+      xhr.onerror = () => reject(new Error('网络中断，上传没有完成'));
+      xhr.ontimeout = () => reject(new Error('上传超时，请检查网络后重试'));
+      xhr.send(file);
+    });
+  },
+  async download(path, filename) {
+    const response = await fetch(`${BASE}${path}`, { credentials: 'include', headers: authHeaders() });
+    if (!response.ok) throw await readError(response);
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || '';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+};
+
 export const api = {
   getState() {
     return request('/api/state');

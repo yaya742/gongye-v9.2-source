@@ -13,5 +13,7 @@ window.__GONGYE_CONFIG__ = {
   basePath: '/',
   // 文化主题开关：false 时 4 个文化日期改用 neutral 插画（见 daily-bookmarks.js）
   culturalThemes: true,
-  demoNotice: '静态演示版：内容与账号均为演示数据，数据保存在本机浏览器，不会上传服务器。'
+  demoNotice: '静态演示版：内容与账号均为演示数据，数据保存在本机浏览器，不会上传服务器。',
+  // 用户协议与隐私政策里的运营方信息；没填的项在页面上标为“待补充”
+  legal: { operator: '', contact: '', effectiveDate: '', dataLocation: '' }
 };

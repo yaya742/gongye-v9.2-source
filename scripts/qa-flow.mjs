@@ -189,6 +189,7 @@ async function main() {
       el.dispatchEvent(new Event('change', { bubbles: true }));
     };
     set('resTitle', '验收脚本资料：极限计算复盘');
+    set('resourceCourse', 'c_calc');
     set('coverage', '数列极限与夹逼，适合期中复习，覆盖率较高的章节。');
     set('limitations', '不含导数与中值定理');
     set('body', '这是验收脚本发布的资料说明，用来检查资料发布闭环。');

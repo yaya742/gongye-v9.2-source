@@ -11,7 +11,12 @@ import { removeKnownDemoPosts } from './demo-post-cleanup.js';
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 
-export function createSeed(now = Date.now()) {
+/**
+ * @param {number} now 基准时间
+ * @param {{ keepDemoPosts?: boolean }} [options] 测试用：保留演示帖子，让规则测试有内容可测。
+ *   默认仍按固定清单移除，新访客看到的是空站。
+ */
+export function createSeed(now = Date.now(), options = {}) {
   const iso = (ms) => new Date(ms).toISOString();
   const at = (hoursAgo) => iso(now - hoursAgo * HOUR);
   const atDay = (daysAgo) => iso(now - daysAgo * DAY);
@@ -664,7 +669,7 @@ export function createSeed(now = Date.now()) {
   // Art V3：8 个生活化账号、12 条帖子的语气与页页表情（在既有结构上就地替换）
   const seeded = applyArtV3(db, now);
   // 固定演示帖子不再公开出现在新初始化的数据里。
-  removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
+  if (!options.keepDemoPosts) removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
   return seeded;
 }
 

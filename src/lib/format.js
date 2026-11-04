@@ -126,6 +126,14 @@ export function formatBytes(bytes) {
 /* ---------- 文本 ---------- */
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+/** 服务端文件地址：跨域部署时补上 apiBase，其余地址原样返回 */
+export function mediaUrl(src) {
+  const value = String(src == null ? '' : src);
+  if (!value.startsWith('/api/')) return value;
+  const config = typeof window !== 'undefined' ? window.__GONGYE_CONFIG__ : null;
+  return `${String((config && config.apiBase) || '').replace(/\/$/, '')}${value}`;
+}
+
 export function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ESC[c]);
 }

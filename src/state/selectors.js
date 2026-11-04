@@ -128,6 +128,22 @@ export function membership(db, userId, circleId) {
   return (db.memberships || []).find((m) => m.userId === userId && m.circleId === circleId) || null;
 }
 
+/** 圈内禁言：管理员设置，可以带截止时间；过期后自动恢复 */
+export function isWriteRestricted(membershipRow, now = Date.now()) {
+  if (!membershipRow || !membershipRow.writeRestricted) return false;
+  return !membershipRow.restrictedUntil || new Date(membershipRow.restrictedUntil).getTime() > now;
+}
+
+/** blockerId 是否拉黑了 blockedId */
+export function blockedBy(db, blockerId, blockedId) {
+  return (db.blocks || []).some((row) => row.blockerId === blockerId && row.blockedId === blockedId);
+}
+
+/** 任一方拉黑对方，两人之间就不能互发私信 */
+export function eitherBlocked(db, a, b) {
+  return blockedBy(db, a, b) || blockedBy(db, b, a);
+}
+
 export function isActiveMember(db, userId, circleId) {
   const m = membership(db, userId, circleId);
   return !!m && m.status === 'active';
@@ -147,7 +163,7 @@ export function courseCircles(db, courseId, status = null) {
 }
 
 /** 某用户能否在圈内写入（发帖/评论） */
-export function circleWriteBlock(db, userId, circleId) {
+export function circleWriteBlock(db, userId, circleId, now = Date.now()) {
   const circle = circleOf(db, circleId);
   if (!circle) return { ok: false, code: 'circle_missing', message: '课友圈不存在' };
   if (circle.status === 'archived') {
@@ -161,13 +177,18 @@ export function circleWriteBlock(db, userId, circleId) {
   if (!m || m.status !== 'active') {
     return { ok: false, code: 'not_member', message: '发布到这个圈需要先确认加入' };
   }
-  if (m.muted) return { ok: false, code: 'muted', message: '你在这个圈被禁言，不能写入内容' };
-  if (m.writeRestricted) return { ok: false, code: 'restricted', message: '你在这个圈的写入权限被临时限制' };
+  if (isWriteRestricted(m, now)) return { ok: false, code: 'restricted', message: restrictionMessage(m) };
   return { ok: true };
 }
 
+function restrictionMessage(m) {
+  return m.restrictedUntil
+    ? `你在这个圈被禁言到 ${String(m.restrictedUntil).slice(0, 10)}，暂时不能发帖和评论`
+    : '你在这个圈被禁言，暂时不能发帖和评论';
+}
+
 /** 资料原帖的讨论：非成员登录后也可纠错，但禁言与归档仍然生效 */
-export function resourceCommentBlock(db, userId, post) {
+export function resourceCommentBlock(db, userId, post, now = Date.now()) {
   const user = userOf(db, userId);
   if (!user || user.status !== 'active') {
     return { ok: false, code: 'suspended', message: '账号已停用，不能评论' };
@@ -179,9 +200,8 @@ export function resourceCommentBlock(db, userId, post) {
     return { ok: false, code: 'archived', message: '来源圈已归档，只能阅读历史讨论' };
   }
   const m = membership(db, userId, post.circleId);
-  if (m && m.muted) return { ok: false, code: 'muted', message: '你在这个圈被禁言，不能借资料入口评论' };
-  if (m && m.writeRestricted) {
-    return { ok: false, code: 'restricted', message: '你在这个圈的写入权限被临时限制' };
+  if (isWriteRestricted(m, now)) {
+    return { ok: false, code: 'restricted', message: restrictionMessage(m) };
   }
   return { ok: true };
 }
@@ -710,6 +730,10 @@ export function openReports(db) {
 }
 
 export function reportTargetLabel(db, report) {
+  if (report.targetType === 'dm') {
+    const peer = userOf(db, report.targetId);
+    return `${peer ? peer.nickname : '已注销用户'} 发来的私信（${(report.evidence || []).length} 条）`;
+  }
   if (report.targetType === 'post') {
     const post = postOf(db, report.targetId);
     return post ? (post.title || stripMarkdown(post.body).slice(0, 24)) : '已删除的帖子';
@@ -835,5 +859,37 @@ export function bookmarkBoard(db, { date = shanghaiDate(new Date()), limit = 5 }
     .filter((row) => row.post)
     .sort((a, b) => b.count - a.count || String(a.post.title || '').localeCompare(String(b.post.title || ''), 'zh'))
     .slice(0, Math.max(1, limit));
+}
+
+/* ---------- 个人数据导出 ---------- */
+
+/** 一个账号能查阅的全部个人数据：资料、发布内容、互动、私信、通知、页签与成长记录 */
+export function personalData(db, userId, now = Date.now()) {
+  const user = userOf(db, userId);
+  if (!user) return null;
+  const mine = (rows, key = 'userId') => (rows || []).filter((row) => row[key] === userId);
+  return {
+    exportedAt: new Date(now).toISOString(),
+    profile: {
+      id: user.id, email: user.email, nickname: user.nickname, avatar: user.avatar, bio: user.bio,
+      role: user.role, status: user.status, joinedAt: user.joinedAt
+    },
+    posts: mine(db.posts, 'authorId'),
+    comments: mine(db.comments, 'authorId'),
+    reactions: mine(db.reactions),
+    follows: mine(db.follows, 'followerId'),
+    memberships: mine(db.memberships),
+    directMessages: (db.directMessages || []).filter((row) => row.senderId === userId || row.recipientId === userId),
+    notifications: mine(db.notifications),
+    blocks: mine(db.blocks, 'blockerId'),
+    reportsFiled: mine(db.reports, 'reporterId').map(({ evidence, ...row }) => row),
+    applications: mine(db.applications, 'applicantId'),
+    giftsSent: mine(db.gifts, 'senderId'),
+    giftsReceived: mine(db.gifts, 'receiverId'),
+    ledger: mine(db.ledger),
+    xp: mine(db.xp),
+    prefs: (db.prefs && db.prefs[userId]) || {},
+    drafts: (db.drafts && db.drafts[userId]) || null
+  };
 }
 

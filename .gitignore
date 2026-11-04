@@ -6,6 +6,9 @@ Thumbs.db
 
 # 内部试用后端的数据（包含同事账号，不要提交）
 server/data/
+# 填了真实邮箱的名单与运行配置（管理员邮箱、云服务配置），仓库是公开的
+server/allowlist.txt
+server/pilot.config.json
 
 # 验收截图（本地可重新生成：node scripts/qa.mjs）
 # 如需把截图随源码一起归档，把下面一行删掉

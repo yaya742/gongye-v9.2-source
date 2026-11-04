@@ -122,11 +122,7 @@ export function growth(ctx) {
           <p>· 删除或违规内容会撤回对应经验，等级随有效经验重算。</p>
           <p>· 等级不限制下载、提问和评论，也不带来管理权限。</p>
         </div>
-        <a class="btn btn-ghost btn-sm mt-3" href="${href('/me/settings')}">${icon('arrow-right', 'i-sm')}账号设置</a>
-      </section>
-      <section class="card">
-        <div class="card-title">说明</div>
-        <p class="small secondary">本页数值来自当前规则版本 ${esc(GROWTH_RULES.version)}；演示数据只在本机浏览器里。</p>
+        <a class="btn btn-ghost btn-sm mt-3" href="${href('/me/settings')}">账号设置</a>
       </section>
     </aside>
   </div>`;

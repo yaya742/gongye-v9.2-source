@@ -6,6 +6,7 @@ import * as posts from './posts.js';
 import * as account from './account.js';
 import * as misc from './misc.js';
 import { growth } from './growth.js';
+import * as legal from './legal.js';
 
 export default {
   resourcesHome: resources.resources,
@@ -34,6 +35,8 @@ export default {
   search: misc.search,
   admin: misc.admin,
   about: misc.about,
+  terms: legal.terms,
+  privacy: legal.privacy,
   notFound: misc.notFound
 };
 
