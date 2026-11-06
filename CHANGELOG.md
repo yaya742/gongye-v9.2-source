@@ -28,6 +28,24 @@
 
 ---
 
+## [10.2.0] - 2026-11-06
+
+### Changed · 首屏瘦身（2026-11-06）
+- `/api/state` 不再全量下发 2375 个课程圈：只带“我的圈 + 有公开帖子的圈”；课程字段由 `id/school/name/code/category` 精简为 `id/school/name`。
+- 新增 `GET /api/circles/index`：全量圈索引 `[id, courseId, status]`，支持 gzip 与 ETag 304；前端首次拉取后缓存到 localStorage，用于补全本地圈列表。
+- 找课页与圈页在索引未到位时显示“正在加载课程圈…”，不再误报“还没有圈 / 圈不存在”。
+  - 文件：`server/view.mjs`、`server/production.mjs`、`server/pilot.mjs`、`src/api/client.js`、`src/main.js`、`src/pages/circles.js`、`tests/circles-index.test.mjs`
+  - 影响：新增公开只读接口；客户端多一次可缓存的索引请求；前端 `course.code/category` 变为 undefined（现有代码已做空值判断）。
+  - 验证：`node --test tests/*.test.mjs` 138 项 133 通过 0 失败 5 跳过；新增用例覆盖首屏裁剪、索引完整性与 304。实测生产首屏 615 KB → 125 KB（-80%），索引 88 KB、二次访问 304。
+  - 回滚：还原上述文件并删除新测试；索引接口可单独保留（不影响旧客户端）。
+
+### Added · CI（2026-11-06）
+- 新增 `.github/workflows/ci.yml`：push / PR 到 `main` 与 `release-*` 时执行 `npm ci`、`node scripts/check.mjs`、`node --test tests/*.test.mjs`（Node 22.13），失败时上传测试临时目录。
+  - 文件：`.github/workflows/ci.yml`
+  - 影响：只影响 CI，不改变运行时。
+  - 验证：工作流命令与本地一致（本地 138 项全绿）。
+  - 回滚：删除该文件。
+
 ## [10.1.0] - 2026-11-06
 
 ### Fixed · 演示模式"找资料"为空、资料详情提示原帖不可见（2026-11-06）

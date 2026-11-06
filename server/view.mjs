@@ -58,12 +58,22 @@ export function publicState(db, meId) {
     receivedGiftQty: list(db, 'gifts').filter((g) => g.receiverId === user.id && g.status === 'active').reduce((sum, g) => sum + (Number(g.qty) || 0), 0)
   };
   const own = (key, keys) => list(db, key).filter((row) => id && row.userId === id).map((row) => fields(row, keys));
+  // 首屏只下发「我的圈 + 有公开帖子的圈」；其余圈走 /api/circles/index 按需缓存
+  const myCircleIds = new Set(list(db, 'memberships')
+    .filter((m) => m.userId === id && m.status === 'active').map((m) => m.circleId));
+  const activeCircleIds = new Set(posts.filter((p) => p.circleId).map((p) => p.circleId));
   const state = {
     version: db.version, revision: db.revision || 0, production: !!db.production, demo: false,
     session: id ? { userId: id } : null,
     users: list(db, 'users').map((u) => ({ ...fields(u, PUBLIC_USER), email: u.id === id ? u.email : '' })),
-    courses: list(db, 'courses').map((c) => fields(c, ['id', 'school', 'name', 'code', 'category'])),
-    circles: list(db, 'circles').map((c) => ({ ...fields(c, ['id', 'courseId', 'status', 'createdAt', 'pinnedPostId', 'archivedAt']), memberCount: memberCounts[c.id] || 0 })),
+    // 首屏只下发「我的圈 + 有公开帖子的圈」；其余圈走 /api/circles/index 按需缓存
+    // const myCircleIds = new Set(list(db, 'memberships')
+    // .filter((m) => m.userId === id && m.status === 'active').map((m) => m.circleId));
+    // const activeCircleIds = new Set(posts.filter((p) => p.circleId).map((p) => p.circleId));
+    courses: list(db, 'courses').map((c) => fields(c, ['id', 'school', 'name'])),
+    circles: list(db, 'circles')
+    .filter((c) => admin || myCircleIds.has(c.id) || activeCircleIds.has(c.id))
+    .map((c) => ({ ...fields(c, ['id', 'courseId', 'status', 'createdAt', 'pinnedPostId', 'archivedAt']), memberCount: memberCounts[c.id] || 0 })),
     memberships: own('memberships', ['userId', 'circleId', 'status', 'muted', 'moderationMuted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted']),
     posts: posts.map((p) => ({ ...fields(p, ['id', 'authorId', 'board', 'circleId', 'courseId', 'title', 'body', 'stickerId', 'tags', 'status', 'publishedAt', 'editedAt', 'acceptedCommentId', 'contentUpdatedAt', 'confirmedOriginal', 'term', 'chapter']),
       images: (Array.isArray(p.images) ? p.images : []).filter((src) => /^\/api\/files\/[0-9a-f-]{36}\/image$/.test(String(src))),

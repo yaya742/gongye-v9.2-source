@@ -1,6 +1,6 @@
 {
   "name": "gongye-web",
-  "version": "10.1.0",
+  "version": "10.2.0",
   "private": true,
   "type": "module",
   "description": "共页：浙大课程学习互助（可信邮箱、共享数据库、私有资料）",

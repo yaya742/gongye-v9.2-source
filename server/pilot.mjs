@@ -554,14 +554,17 @@ export function publicState(db, meId, system = null) {
       email: user.id === meId ? user.email : '',
       verified: user.id === meId && user.verified === true
     })),
-    courses: (db.courses || []).map((course) => pickFields(course, ['id', 'school', 'name', 'code', 'category'])),
-    circles: (db.circles || []).map((circle) => pickFields(circle, [
-      'id', 'courseId', 'status', 'createdBy', 'inviteCode', 'createdAt', 'pinnedPostId'
-    ])),
+    courses: (db.courses || []).map((course) => pickFields(course, ['id', 'school', 'name'])),
+    circles: (db.circles || [])
+      .filter((circle) => (db.memberships || []).some((m) => m.userId === meId && m.circleId === circle.id && m.status === 'active')
+        || posts.some((post) => post.circleId === circle.id))
+      .map((circle) => pickFields(circle, [
+        'id', 'courseId', 'status', 'createdBy', 'inviteCode', 'createdAt', 'pinnedPostId'
+      ])),
     circleInviteAliases: (db.circleInviteAliases || [])
       .filter((alias) => {
         if (!alias || typeof alias.code !== 'string' || !alias.code || typeof alias.circleId !== 'string') return false;
-        const target = circles.find((circle) => circle.id === alias.circleId);
+        const target = (db.circles || []).find((circle) => circle.id === alias.circleId);
         return Boolean(target && canonicalIds.get(target.courseId) === target.id);
       })
       .map((alias) => pickFields(alias, ['code', 'circleId'])),
@@ -1017,6 +1020,13 @@ export async function createPilotServer(options = {}) {
         sendJson(res, 200, data, {
           'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent('共页-我的数据.json')}`
         });
+        return;
+      }
+
+      if (urlPath === '/api/circles/index') {
+        // 全量圈索引：id/courseId/status，供前端缓存后本地筛选
+        const items = (db.circles || []).map((circle) => [circle.id, circle.courseId, circle.status || 'active']);
+        sendJson(res, 200, { version: 1, items });
         return;
       }
 

@@ -220,6 +220,8 @@ export function findCircles(ctx) {
   });
 
   const total = list.length;
+  // 首屏只下发我的圈与有帖子的圈；索引未到位时不要显示“还没有圈”
+  const indexLoading = (db.circles || []).length < (db.courses || []).filter((c) => c.id !== 'c_general').length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const current = Math.min(page, pageCount);
   const visible = list.slice((current - 1) * pageSize, current * pageSize);
@@ -297,7 +299,7 @@ export function findCircles(ctx) {
         ? '<span class="tiny muted">搜索课程名可查看还没人的圈</span>'
         : `<a class="tiny link" href="${href('/find-circles')}">清除筛选</a>`}
     </div>
-    ${total ? `<div class="find-grid">${cards}</div>` : `<div class="card">${emptyState({
+    ${indexLoading ? '<div class="card"><p class="small secondary">正在加载全部课程圈…</p></div>' : total ? `<div class="find-grid">${cards}</div>` : `<div class="card">${emptyState({
       img: 'empty-search.svg',
       title: activityOnly ? '暂时没有活跃的课友圈' : '还没有这门课的圈',
       text: activityOnly
@@ -353,6 +355,8 @@ export function circle(ctx) {
   const { db, me, route } = ctx;
   const circle = S.circleOf(db, route.params.id);
   if (!circle) {
+    const loading = (db.circles || []).length < (db.courses || []).filter((c) => c.id !== 'c_general').length;
+    if (loading) return '<div class="layout-1"><div class="card"><p class="small secondary">正在加载课程圈…</p></div></div>';
     return `<div class="layout-1">${emptyState({
       img: 'removed.svg', title: '这个课友圈不存在', text: '链接可能有误，或圈已被合并。',
       actions: `<a class="btn btn-sm" href="${href('/find-circles')}">去找课</a>`

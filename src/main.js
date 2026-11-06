@@ -45,6 +45,7 @@ const ui = {
 };
 
 const COMPOSE_DRAFT_KEY = 'gongye-compose-draft';
+const CIRCLE_INDEX_KEY = 'gongye-circle-index';
 const MAX_POST_IMAGE_COUNT = 9;
 // 原图上限：手机照片会先压缩，压缩后的大小才计入
 const MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024;
@@ -477,6 +478,38 @@ function syncDirectMessagePolling() {
       directMessagePollBusy = false;
     }
   }, 12_000);
+}
+
+/* 全量圈索引：首屏只下发我的圈与有帖子的圈，其余按需拉取后缓存到本机 */
+let circleIndexPromise = null;
+function mergeCircleIndex(items) {
+  const state = store.getState();
+  if (!state || !Array.isArray(items)) return false;
+  const known = new Set((state.circles || []).map((circle) => circle.id));
+  const added = items
+    .filter((row) => Array.isArray(row) && typeof row[0] === 'string' && !known.has(row[0]))
+    .map(([id, courseId, status]) => ({ id, courseId, status: status || 'active' }));
+  if (!added.length) return false;
+  store.setState({ ...state, circles: [...(state.circles || []), ...added] });
+  return true;
+}
+
+function ensureCircleIndex() {
+  if (!isRemote || circleIndexPromise) return circleIndexPromise;
+  const state = store.getState();
+  const expected = (state?.courses || []).length;
+  if (!expected || (state.circles || []).length >= expected) return null;
+  try {
+    const cached = JSON.parse(localStorage.getItem(CIRCLE_INDEX_KEY) || 'null');
+    if (cached && cached.version === 1) mergeCircleIndex(cached.items);
+  } catch { /* 缓存损坏时忽略，下次请求重新写入 */ }
+  circleIndexPromise = api.circlesIndex().then((fresh) => {
+    if (fresh && fresh.version === 1) {
+      mergeCircleIndex(fresh.items);
+      try { localStorage.setItem(CIRCLE_INDEX_KEY, JSON.stringify(fresh)); } catch { /* 忽略配额错误 */ }
+    }
+  }).catch(() => { circleIndexPromise = null; });
+  return circleIndexPromise;
 }
 
 function updateDocumentMeta(context) {
@@ -2385,6 +2418,7 @@ async function boot() {
     try {
       const payload = await api.getState();
       store.setState(payload.state);
+      ensureCircleIndex();
       if (!authAvailable()) toast('真实邮件服务尚未就绪，暂不能登录；游客仍可浏览公开资料。', 'error');
     } catch (error) {
       console.error('[boot] 无法连接后端', error);

@@ -1,5 +1,7 @@
 /* Small-deployment, single-instance service. TLS is terminated by a trusted same-origin proxy. */
 import http from 'node:http';
+import crypto from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -231,6 +233,22 @@ export async function createProductionServer(options = {}) {
         if (pathname === '/api/health' && req.method === 'GET') {
           json(res, 200, { ok: true, mode: 'production', authMode: 'email-otp', authReady: auth.authReady });
           return;
+        }
+        if (pathname === '/api/circles/index' && req.method === 'GET') {
+          // 全量圈索引：只含 id/courseId/status，供前端缓存后本地筛选；不带成员或帖子细节
+          const items = await store.run(() => (db.circles || []).map((c) => [c.id, c.courseId, c.status || 'active']));
+          const raw = JSON.stringify({ version: 1, items });
+          const etag = `"${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 20)}"`;
+          if (req.headers['if-none-match'] === etag) {
+            res.writeHead(304, { etag, 'cache-control': 'public, max-age=300' });
+            res.end(); return;
+          }
+          const gzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+          const payload = gzip ? gzipSync(raw) : Buffer.from(raw);
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'public, max-age=300', etag,
+            ...(gzip ? { 'content-encoding': 'gzip' } : {}), 'content-length': payload.length });
+          res.end(payload); return;
         }
         if (pathname === '/api/state' && req.method === 'GET') {
           const value = await store.run(() => publicState(db, auth.userFromRequest(db, req)?.id));

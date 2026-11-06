@@ -123,6 +123,9 @@ export const api = {
   getState() {
     return request('/api/state');
   },
+  circlesIndex() {
+    return request('/api/circles/index');
+  },
   action(name, payload = {}) {
     return request('/api/action', {
       method: 'POST',
