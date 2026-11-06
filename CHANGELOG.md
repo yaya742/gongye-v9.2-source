@@ -30,6 +30,13 @@
 
 ## [10.1.0] - 2026-11-06
 
+### Fixed · 演示模式"找资料"为空、资料详情提示原帖不可见（2026-11-06）
+- 演示帖子清理改为按需触发：`createSeed` 默认保留演示内容，只有显式 `{ keepDemoPosts: false }` 才清理（试用后端 `server/pilot.mjs` 与 `createProductionSeed` 传 `false`）。修复演示站 6 条资料挂着的原帖被清掉后，找资料列表为空、详情页显示"原帖当前不可见"的问题。
+  - 文件：`src/data/seed.js`、`server/pilot.mjs`、`server/database.mjs`
+  - 影响：演示模式（`demo-static`）重新初始化后可见演示帖子与资料；生产库仍只保留课程与圈，试用后端仍清演示内容。
+  - 验证：浏览器实测（清 localStorage 后，找资料列出 6 条资料、详情页可打开且下载按钮可用、无控制台错误）；`node --test tests/*.test.mjs` 137 项 132 通过 0 失败 5 跳过。
+  - 回滚：还原上述三个文件。
+
 ### Added · 生产后端图片上传（2026-11-06）
 - 生产服务支持图片上传与公开读取：`POST /api/files` 接受 `image/jpeg`、`image/png`、`image/webp`，按文件头校验类型（拒绝 SVG/伪造类型），单张 ≤ 3 MiB；写入私有目录，配置 ClamAV 时同样过扫描（未配置则拒绝上传）。
 - 发帖 `images` 最多 9 项，只接受本人上传且未使用的 `uploadId`；路径由服务端生成为 `/api/files/<id>/image`，客户端不能提交任意 URL。

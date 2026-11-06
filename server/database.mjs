@@ -13,7 +13,7 @@ const COLLECTIONS = ['users', 'courses', 'circles', 'memberships', 'posts', 'att
 const MAPS = ['wallets', 'prefs', 'drafts'];
 
 export function createProductionSeed(now = Date.now()) {
-  const seed = createSeed(now);
+  const seed = createSeed(now, { keepDemoPosts: false });
   const db = { version: 4, seedVersion: 0, production: true, demo: false,
     createdAt: new Date(now).toISOString(), session: null, revision: 0 };
   for (const key of COLLECTIONS) db[key] = [];

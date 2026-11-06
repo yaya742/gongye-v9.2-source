@@ -705,7 +705,7 @@ export function createSeed(now = Date.now(), options = {}) {
   // Art V3：8 个生活化账号、12 条帖子的语气与页页表情（在既有结构上就地替换）
   const seeded = applyArtV3(db, now);
   // 固定演示帖子不再公开出现在新初始化的数据里。
-  if (!options.keepDemoPosts) removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
+  if (options.keepDemoPosts === false) removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
   return seeded;
 }
 

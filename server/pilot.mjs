@@ -249,7 +249,7 @@ export class JsonStore {
         return this.data;
       }
     }
-    this.data = createSeed(Date.now());
+    this.data = createSeed(Date.now(), { keepDemoPosts: false });
     this.data.sessions = [];
     this.data.pilot = { createdAt: new Date().toISOString() };
     await this.save();
