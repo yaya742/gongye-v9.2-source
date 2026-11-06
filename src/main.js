@@ -1,28 +1,29 @@
 /* 应用入口：装配数据、路由、渲染与全局交互 */
 
 import { createStore, createRemoteStore } from './state/store.js';
-import { api, auth } from './api/client.js';
-import * as cloudAuth from './api/cloudAuth.js';
+import { api, auth, files as fileApi } from './api/client.js';
 import * as A from './state/actions.js';
 import * as S from './state/selectors.js';
 import { routeOf, href, navigate, absoluteShare } from './router.js';
 import { $, setHTML, delegate } from './lib/dom.js';
-import { esc, shanghaiDate } from './lib/format.js';
+import { esc, shanghaiDate, formatDateTime } from './lib/format.js';
+import { renderMarkdown } from './lib/markdown.js';
 import { bookmarkSheet, todayEntry } from './components/bookmark.js';
 import { icon } from './lib/icons.js';
 import { GROWTH_RULES } from './data/growth.js';
-import { renderHeader, renderMobileNav, renderDemoStrip } from './components/layout.js';
+import { renderHeader, renderMobileNav, renderDemoStrip, renderFooter } from './components/layout.js';
 import pageRegistry from './pages/index.js';
 
 const config = window.__GONGYE_CONFIG__ || {};
 const isRemote = config.mode === 'production';
-// 云服务邮箱验证码：前端拿云端证明，后端换成站点会话
-const isCloudAuth = isRemote && config.authMode === 'cloud';
-const store = isRemote ? createRemoteStore() : createStore({ key: config.storageKey });
+const isDemo = config.mode === 'demo-static';
+const authAvailable = () => !isRemote || (config.authMode === 'email-otp' && config.authReady === true);
+const store = isDemo ? createStore({ key: config.storageKey }) : createRemoteStore();
 
 const viewEl = $('#view');
 const headerEl = $('#site-header');
 const navEl = $('#mobile-nav');
+const footerEl = $('#site-footer');
 const overlayEl = $('#overlay');
 
 /* 仅在本次会话内使用的界面状态（不写入持久数据） */
@@ -32,17 +33,28 @@ const ui = {
   pendingConfirm: null,
   images: [],
   files: [],
+  uploading: false,
+  publishing: false,
+  uploadError: '',
+  codeSending: false,
+  codeRetryAt: 0,
+  codeHint: '',
+  verifying: false,
+  editorDrafts: new Map(),
   toastTimer: 0
 };
 
+const COMPOSE_DRAFT_KEY = 'gongye-compose-draft';
+const CIRCLE_INDEX_KEY = 'gongye-circle-index';
 const MAX_POST_IMAGE_COUNT = 9;
-const MAX_IMAGE_FILE_BYTES = 10 * 1024 * 1024;
-// 图片会以内联 data URL 放进 JSON 请求；给生产后端 1 MiB body 上限留出编码和正文空间。
-const MAX_POST_IMAGE_BYTES = isRemote ? 512 * 1024 : 800 * 1024;
-let pendingImageBytes = 0;
+// 原图上限：手机照片会先压缩，压缩后的大小才计入
+const MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024;
+const IMAGE_MAX_SIDE = 1920;
+// 静态演示版把图片存进浏览器本地存储，只能给很小的总量；试用后端逐张上传，不受这个限制
+const MAX_POST_IMAGE_BYTES = 800 * 1024;
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
 let pendingImageCount = 0;
 let imageReadGeneration = 0;
-const pendingImageReaders = new Set();
 let directMessagePollTimer = 0;
 let directMessagePollBusy = false;
 
@@ -77,6 +89,7 @@ function once(key, fn) {
 let lastPath = null;
 let lastSearch = null;
 let tabTimer = 0;
+let bootDone = false;
 let staggerTimer = 0;
 const scrollMemory = new Map();
 let lastDetail = null;
@@ -127,21 +140,28 @@ function applyRouteChange(next) {
   const changedPath = next.path !== prevPath;
   const queryKey = JSON.stringify(next.query || {});
   const queryChanged = queryKey !== lastSearch;
+  const onlyOffsetChanged = sameExceptOffset(lastSearch, next.query);
   scrollMemory.set(prevPath, window.scrollY);
 
   lastPath = next.path;
   lastSearch = queryKey;
   ui.replyTarget = null;
   ui.freshCommentId = null;
-  if (next.name !== 'compose' && next.name !== 'resourcePublish') {
-    discardPendingImages();
+  if (isRemote && changedPath && ['compose', 'resourcePublish'].includes(ctx.route?.name)) {
+    if (ui.justPublished !== ctx.route.name) ui.editorDrafts.set(ctx.route.name, snapshotFields());
+    else ui.editorDrafts.delete(ctx.route.name);
+    ui.justPublished = null;
+  }
+  if (!isRemote && next.name !== 'compose' && next.name !== 'resourcePublish') {
     ui.images = [];
     ui.files = [];
   }
+  if (next.name !== 'compose') ui.composeDraftLoaded = false;
+  if (next.name !== 'resources') ui.filtersOpen = false;
 
   if (!changedPath) {
-    // 同一路径只换了 tab / 筛选：用卡片入场代替瞬移
-    render({ preserve: true, animate: queryChanged ? 'tab' : null });
+    // 同一路径只换了 tab / 筛选：用卡片入场代替瞬移；“加载更多”是追加，不重播入场
+    render({ preserve: true, animate: queryChanged && !onlyOffsetChanged ? 'tab' : null });
     return;
   }
 
@@ -177,11 +197,16 @@ function applyRouteChange(next) {
       } else {
         window.scrollTo(0, 0);
       }
+      if (next.query.focus === 'comments') jumpToComments({ smooth: false });
       return;
     }
 
     const saved = scrollMemory.get(next.path);
     window.scrollTo(0, saved != null ? saved : 0);
+    if (next.name === 'search' && !next.query.q) {
+      const input = viewEl.querySelector('#search-q');
+      if (input) input.focus({ preventScroll: true });
+    }
 
     if (leavingDetail && detailId) {
       const card = viewEl.querySelector(`[data-card-id="${detailId}"]`);
@@ -219,6 +244,26 @@ function applyRouteChange(next) {
     clearTransitionNames();
   }
   ui.vtSourceTop = null;
+}
+
+function sameExceptOffset(previousKey, query) {
+  const strip = ({ offset, ...rest }) => JSON.stringify(rest);
+  try {
+    return strip(JSON.parse(previousKey || '{}')) === strip(query || {});
+  } catch {
+    return false;
+  }
+}
+
+/** 定位到讨论区。不用 #comments 锚点：hash 已被路由占用，锚点会被当成新页面。 */
+function jumpToComments({ smooth = true, focus = false } = {}) {
+  const section = viewEl.querySelector('#comments');
+  if (!section) return;
+  section.scrollIntoView({ block: 'start', behavior: smooth && !prefersReducedMotion() ? 'smooth' : 'auto' });
+  if (focus) {
+    const area = section.querySelector('textarea');
+    if (area) area.focus({ preventScroll: true });
+  }
 }
 
 let fselBound = false;
@@ -273,6 +318,7 @@ function enhanceFilterSelects(root) {
         if (item) item.setAttribute('aria-selected', option.value === select.value ? 'true' : 'false');
       });
     };
+    select.addEventListener('change', sync);
     const close = () => {
       wrap.classList.remove('is-open');
       menu.hidden = true;
@@ -320,14 +366,22 @@ function render(options = {}) {
   ctx.db = store.getState();
   if (!ctx.db) {
     setHTML(viewEl, `<div class="layout-1"><div class="card">
-      <h2>正在连接试用服务器…</h2>
+      <h2>正在连接服务器…</h2>
       <p class="small secondary mt-2">如果一直停在这里，请确认后台服务已启动，然后刷新页面。</p>
     </div></div>`);
     return;
   }
   ctx.me = S.currentUser(ctx.db);
+  if (isRemote && ui.editorOwner !== (ctx.me?.id || null)) {
+    ui.files = [];
+    ui.images = [];
+    ui.editorDrafts.clear();
+    ui.uploadError = '';
+    ui.editorOwner = ctx.me?.id || null;
+  }
   ctx.route = routeOf();
   syncDirectMessagePolling();
+  if (ctx.route.name === 'compose' && ctx.me && !ui.composeDraftLoaded) restoreComposeDraft();
 
   const scrollY = options.keepScroll === false ? 0 : window.scrollY;
   const page = pageRegistry[ctx.route.name] || pageRegistry.notFound;
@@ -346,9 +400,12 @@ function render(options = {}) {
   }
 
   setHTML(viewEl, html);
+  if (isRemote && ui.editorDrafts.has(ctx.route.name)) restoreFields(ui.editorDrafts.get(ctx.route.name));
   enhanceFilterSelects(viewEl);
+  syncCounters();
   setHTML(headerEl, renderHeader(ctx));
   setHTML(navEl, renderMobileNav(ctx));
+  if (footerEl && !footerEl.innerHTML) setHTML(footerEl, renderFooter());
 
   if (options.enter === 'route') {
     viewEl.dataset.enter = 'route';
@@ -385,16 +442,19 @@ function render(options = {}) {
     }
   });
 
-  const stripMarkup = renderDemoStrip(ctx);
-  const existingStrip = document.getElementById('demo-strip');
-  if (!stripMarkup) {
-    existingStrip?.remove();
-  } else {
-    const strip = existingStrip || document.createElement('div');
+  if (!bootDone) {
+    const strip = document.createElement('div');
     strip.id = 'demo-strip';
-    setHTML(strip, stripMarkup);
-    if (!existingStrip) headerEl.after(strip);
+    setHTML(strip, renderDemoStrip(ctx));
+    headerEl.after(strip);
+    bootDone = true;
   }
+}
+
+function restoreScroll(y) {
+  if (!y) return;
+  const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  window.scrollTo(0, Math.min(y, max));
 }
 
 function syncDirectMessagePolling() {
@@ -420,10 +480,36 @@ function syncDirectMessagePolling() {
   }, 12_000);
 }
 
-function restoreScroll(y) {
-  if (!y) return;
-  const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-  window.scrollTo(0, Math.min(y, max));
+/* 全量圈索引：首屏只下发我的圈与有帖子的圈，其余按需拉取后缓存到本机 */
+let circleIndexPromise = null;
+function mergeCircleIndex(items) {
+  const state = store.getState();
+  if (!state || !Array.isArray(items)) return false;
+  const known = new Set((state.circles || []).map((circle) => circle.id));
+  const added = items
+    .filter((row) => Array.isArray(row) && typeof row[0] === 'string' && !known.has(row[0]))
+    .map(([id, courseId, status]) => ({ id, courseId, status: status || 'active' }));
+  if (!added.length) return false;
+  store.setState({ ...state, circles: [...(state.circles || []), ...added] });
+  return true;
+}
+
+function ensureCircleIndex() {
+  if (!isRemote || circleIndexPromise) return circleIndexPromise;
+  const state = store.getState();
+  const expected = (state?.courses || []).length;
+  if (!expected || (state.circles || []).length >= expected) return null;
+  try {
+    const cached = JSON.parse(localStorage.getItem(CIRCLE_INDEX_KEY) || 'null');
+    if (cached && cached.version === 1) mergeCircleIndex(cached.items);
+  } catch { /* 缓存损坏时忽略，下次请求重新写入 */ }
+  circleIndexPromise = api.circlesIndex().then((fresh) => {
+    if (fresh && fresh.version === 1) {
+      mergeCircleIndex(fresh.items);
+      try { localStorage.setItem(CIRCLE_INDEX_KEY, JSON.stringify(fresh)); } catch { /* 忽略配额错误 */ }
+    }
+  }).catch(() => { circleIndexPromise = null; });
+  return circleIndexPromise;
 }
 
 function updateDocumentMeta(context) {
@@ -444,10 +530,12 @@ function updateDocumentMeta(context) {
     settings: '账号设置 · 共页',
     admin: '管理后台 · 共页',
     about: '关于共页 · 共页',
+    terms: '用户协议 · 共页',
+    privacy: '隐私政策 · 共页',
     notFound: '页面不存在 · 共页'
   };
   let title = titles[route.name] || fallback;
-  let description = '共页：按课程与用途找到可预览的学习资料，按学期与教学班找到一起上课的同学。';
+  let description = '共页：按课程与用途找到可预览的学习资料，也找到一起上这门课的同学。';
 
   if (route.name === 'resource') {
     const resource = S.resourceOf(db, route.params.id);
@@ -486,7 +574,7 @@ function updateDocumentMeta(context) {
 function snapshotFields() {
   const map = new Map();
   viewEl.querySelectorAll('input, textarea, select').forEach((el) => {
-    if (!el.name) return;
+    if (!el.name || el.type === 'file') return;
     const key = fieldKey(el);
     map.set(key, el.type === 'checkbox' || el.type === 'radio' ? el.checked : el.value);
   });
@@ -501,19 +589,24 @@ function fieldKey(el) {
 function restoreFields(map) {
   if (!map || !map.size) return;
   viewEl.querySelectorAll('input, textarea, select').forEach((el) => {
-    if (!el.name) return;
+    if (!el.name || el.type === 'file') return;
     const key = fieldKey(el);
     if (!map.has(key)) return;
     const value = map.get(key);
     if (el.type === 'checkbox' || el.type === 'radio') el.checked = !!value;
-    else if (el.value === '') el.value = value;
+    else el.value = value;
+    if (el.type === 'select-one') el.dispatchEvent(new Event('change'));
   });
 }
 
-async function invoke(actionName, payload = {}) {
+async function invoke(actionName, payload = {}, options = {}) {
   const snapshot = captureUiState();
   const action = A[actionName];
 
+  if (!isRemote && !isDemo) {
+    toast('运行模式未配置：生产站点必须连接真实后端，本地演示需显式配置 demo-static。', 'error');
+    return { ok: false, code: 'mode', message: '运行模式未配置' };
+  }
   if (!isRemote && typeof action !== 'function') {
     toast(`未实现的动作：${actionName}`, 'error');
     return { ok: false, message: '未实现的动作' };
@@ -522,12 +615,9 @@ async function invoke(actionName, payload = {}) {
   let result;
   try {
     if (isRemote) {
-      // 试用版：所有写入都交给服务端执行，浏览器只拿回结果与最新状态
       const response = await api.action(actionName, payload);
-      store.setState(response.state);
-      result = response.result;
-      // 跨域名部署时靠这个 token 维持登录（同域名下 Cookie 也有效）
-      if (result && result.ok && result.data && result.data.token) auth.set(result.data.token);
+      if (response.state) store.setState(response.state);
+      result = response.result || { ok: false, message: '服务器未返回操作结果' };
     } else {
       store.commit((db) => {
         result = action(db, payload);
@@ -537,12 +627,17 @@ async function invoke(actionName, payload = {}) {
   } catch (error) {
     console.error('[action] failed', actionName, error);
     const message = error && error.message ? error.message : '未知错误';
-    toast(`操作失败：${message}`, 'error');
+    if (!options.quiet) toast(`操作失败：${message}`, 'error');
+    if (isRemote && ['requestCode', 'verifyCode'].includes(actionName) && error.status === 503) {
+      config.authReady = false;
+      ui.codeHint = '真实邮件服务暂不可用，已禁用登录，请联系维护者配置 SMTP。';
+      refreshPreserving();
+    }
     restoreUiState(snapshot);
-    return { ok: false, code: (error && error.code) || 'exception', message };
+    return { ok: false, code: (error && error.code) || 'exception', status: error.status, message };
   }
   restoreUiState(snapshot);
-  if (result && result.message) toast(result.message, result.ok ? 'ok' : 'error');
+  if (result && result.message && !options.quiet && !(options.silent && result.ok)) toast(result.message, result.ok ? 'ok' : 'error');
   if (result && result.ok && result.data && result.data.levelUp) {
     const up = result.data.levelUp;
     window.setTimeout(() => toast(`升到 LV.${up.to} ${up.name} 了`, 'ok'), 900);
@@ -558,9 +653,26 @@ function captureUiState() {
   };
 }
 
+/* 模板里已经写了“/ 上限”，这里只更新已输入字数 */
+function updateCounter(el) {
+  const target = viewEl.querySelector(`[data-counter="${el.dataset.countFor}"]`);
+  if (!target) return;
+  const max = Number(el.dataset.max || 0);
+  const length = el.value.trim().length;
+  target.textContent = String(length);
+  target.parentElement.classList.toggle('over', max > 0 && length > max);
+}
+
+function syncCounters() {
+  viewEl.querySelectorAll('[data-count-for]').forEach(updateCounter);
+}
+
 function restoreUiState(snapshot) {
   if (!snapshot) return;
   restoreFields(snapshot.fields);
+  syncSourceConfirm();
+  syncComposeCourse();
+  syncCounters();
   if (!snapshot.active) return;
   const target = Array.from(viewEl.querySelectorAll('[name]')).find((el) => fieldKey(el) === snapshot.active);
   if (target) target.focus({ preventScroll: true });
@@ -570,6 +682,43 @@ function refreshPreserving() {
   const snapshot = captureUiState();
   render({ preserve: true });
   restoreUiState(snapshot);
+}
+
+let codeTimer = 0;
+function syncCodeCooldown() {
+  clearTimeout(codeTimer);
+  const remaining = Math.max(0, Math.ceil((ui.codeRetryAt - Date.now()) / 1000));
+  const button = viewEl.querySelector('[data-action="send-code"]');
+  if (button) {
+    button.disabled = !authAvailable() || ui.codeSending || remaining > 0;
+    button.textContent = ui.codeSending ? '发送中…' : remaining ? `${remaining} 秒后重发` : '发送验证码';
+  }
+  if (remaining) codeTimer = window.setTimeout(syncCodeCooldown, 1000);
+}
+
+async function requestLoginCode(email) {
+  if (!authAvailable()) return toast('真实邮件服务尚未配置或不可用，暂不能发送验证码。', 'error');
+  if (ui.codeSending || ui.codeRetryAt > Date.now()) return;
+  ui.codeSending = true;
+  syncCodeCooldown();
+  try {
+    const result = await invoke('requestCode', { email: String(email || '').trim() });
+    if (result.ok) {
+      ui.codeHint = isRemote ? '真实验证码已发送，请到邮箱收取；至少 60 秒后可重发。' : '本地演示验证码固定为 123456，不会发送邮件。';
+      ui.codeRetryAt = Date.now() + Math.max(60, Number(result.data?.retryAfter) || 60) * 1000;
+    } else if (result.code === 'rate_limit' || result.status === 429) {
+      ui.codeRetryAt = Date.now() + 60000;
+      ui.codeHint = result.message || '发送过于频繁，请稍后再试。';
+    } else {
+      ui.codeHint = result.message || '发送失败，表单已保留，请稍后重试。';
+    }
+    const hint = viewEl.querySelector('[data-code-hint]');
+    if (hint) hint.textContent = ui.codeHint;
+    return result;
+  } finally {
+    ui.codeSending = false;
+    syncCodeCooldown();
+  }
 }
 
 function requireLogin(nextPath = null) {
@@ -646,6 +795,18 @@ function confirmModal({ title, text, confirmLabel = '确认', danger = false, on
 }
 
 function downloadFile(path, filename) {
+  if (isRemote) {
+    if (!/^\/api\/files\/[A-Za-z0-9_-]+\/download$/.test(String(path))) {
+      return toast('服务器未返回有效的同源下载地址，已阻止下载。', 'error');
+    }
+    fileApi.download(path, filename).catch((error) => toast(error.message || '下载失败', 'error'));
+    return;
+  }
+  if (String(path).startsWith('/api/files/')) {
+    fileApi.download(path, filename).catch((error) => toast(error.message || '下载失败', 'error'));
+    return;
+
+  }
   const a = document.createElement('a');
   a.href = path;
   a.download = filename || '';
@@ -721,10 +882,14 @@ function openGiftModal(postId) {
 
 function openReportModal(targetType, targetId) {
   if (!ctx.me) return requireLogin();
-  const reasons = ['版权风险', '不当内容', '广告或灌水', '隐私泄露', '疑似代写代考', '文件有问题', '其他'];
+  const isDm = targetType === 'dm';
+  const reasons = isDm
+    ? ['骚扰或辱骂', '广告或诈骗', '发送不当内容', '冒充他人', '其他']
+    : ['版权风险', '不当内容', '广告或灌水', '隐私泄露', '疑似代写代考', '文件有问题', '其他'];
   openModal({
-    title: '举报',
+    title: isDm ? '举报私信' : '举报',
     body: `
+      ${isDm ? '<p class="small secondary mb-3">会把对方最近发给你的 10 条私信附给管理员核查，你发出的私信不会附上。</p>' : ''}
       <form data-form="report" data-target-type="${esc(targetType)}" data-target-id="${esc(targetId)}">
         <div class="field">
           <label for="report-reason">举报原因</label>
@@ -748,6 +913,7 @@ function openAdminReportModal(reportId) {
   const db = ctx.db;
   const report = S.byId(db.reports, reportId);
   if (!report) return toast('举报不存在', 'error');
+  if (report.targetType === 'dm') return openAdminDmReportModal(report);
   openModal({
     title: '处理举报',
     wide: true,
@@ -779,16 +945,134 @@ function openAdminReportModal(reportId) {
   });
 }
 
-function openShareModal(path) {
+/* 私信举报：展示举报人收到的那几条私信，只能删除或不处理 */
+function openAdminDmReportModal(report) {
+  const db = ctx.db;
+  openModal({
+    title: '处理私信举报',
+    wide: true,
+    body: `
+      <form data-form="admin-report" data-report="${esc(report.id)}">
+        <div class="card card-tight mb-3">
+          <div class="small"><b>对象：</b>${esc(S.reportTargetLabel(db, report))}</div>
+          <div class="small"><b>原因：</b>${esc(report.reason)}${report.detail ? ` · ${esc(report.detail)}` : ''}</div>
+          <ul class="list-plain dm-evidence mt-2">${(report.evidence || []).map((row) => `<li>
+            <div class="tiny muted">${esc(formatDateTime(row.createdAt))}</div>
+            <div class="small">${esc(row.body)}</div>
+          </li>`).join('')}</ul>
+        </div>
+        <div class="field">
+          <label for="admin-action">处理方式</label>
+          <select class="select" id="admin-action" name="action">
+            <option value="remove">删除这些私信，并提醒对方</option>
+            <option value="dismiss">不处理（记录理由）</option>
+          </select>
+          <p class="field-help">需要封禁账号时，到“用户”页签操作。</p>
+        </div>
+        <div class="field">
+          <label for="admin-reason">处理理由（必填，写入审计）</label>
+          <textarea class="textarea textarea-sm" id="admin-reason" name="reason" rows="2" required></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-action="close-modal">取消</button>
+          <button class="btn" type="submit">提交处理</button>
+        </div>
+      </form>`
+  });
+}
+
+/* 管理员：在单个圈里禁言或移出成员，理由会通知对方 */
+function openMemberModal({ circle: circleId, user: userId, act }) {
+  const db = ctx.db;
+  const user = S.userOf(db, userId);
+  const circle = S.circleOf(db, circleId);
+  if (!user || !circle) return toast('成员不存在', 'error');
+  const course = S.courseOf(db, circle.courseId) || {};
+  const muting = act === 'mute';
+  return openModal({
+    title: muting ? '在本圈禁言' : '移出课友圈',
+    body: `<form data-form="admin-member" data-circle="${esc(circleId)}" data-user="${esc(userId)}" data-act="${esc(act)}">
+      <p class="small secondary mb-3">${esc(user.nickname)} · ${esc(course.name || '')}课友圈。${muting
+        ? '禁言期间不能在这个圈发帖和评论，其他圈不受影响。'
+        : '移出后对方不能再进入这个圈参与讨论，需要管理员允许才能重新加入。'}</p>
+      ${muting ? `<div class="field">
+        <label for="member-days">禁言时长</label>
+        <select class="select" id="member-days" name="days">
+          <option value="1">1 天</option>
+          <option value="7" selected>7 天</option>
+          <option value="30">30 天</option>
+          <option value="">长期（手动解除）</option>
+        </select>
+      </div>` : ''}
+      <div class="field">
+        <label for="member-reason">理由（必填，会通知对方并写入审计）</label>
+        <textarea class="textarea textarea-sm" id="member-reason" name="reason" rows="2" required></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" data-action="close-modal">取消</button>
+        <button class="btn ${muting ? '' : 'btn-danger'}" type="submit">${muting ? '禁言' : '移出'}</button>
+      </div>
+    </form>`
+  });
+}
+
+/* 注销账号：选择怎么处理发布过的内容，输入“注销”确认 */
+function openDeleteAccountModal() {
+  if (!ctx.me) return requireLogin('/me/settings');
+  return openModal({
+    title: '注销账号',
+    body: `<form data-form="delete-account">
+      <p class="small secondary">注销后，邮箱、昵称、简介、私信、通知、关注、收藏和页签记录都会删除，所有设备上的登录随即失效，<b>无法恢复</b>。需要的话，先在设置里导出你的数据。</p>
+      <fieldset class="delete-options mt-3">
+        <legend class="small"><b>你发布过的帖子、资料和评论</b></legend>
+        <label class="checkbox mt-2"><input type="radio" name="mode" value="anonymize" checked>
+          <span><b>保留，显示为“已注销用户”</b>：同学还能继续看到你分享的笔记</span></label>
+        <label class="checkbox mt-2"><input type="radio" name="mode" value="delete">
+          <span><b>全部删除</b>：永久移除，收到的页签按规则退回给送出的人</span></label>
+      </fieldset>
+      <div class="field mt-3">
+        <label for="delete-confirm">输入“注销”两个字确认</label>
+        <input class="input" id="delete-confirm" name="confirmText" autocomplete="off">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" data-action="close-modal">取消</button>
+        <button class="btn btn-danger" type="submit">注销账号</button>
+      </div>
+    </form>`
+  });
+}
+
+async function exportMyData() {
+  if (!ctx.me) return requireLogin('/me/settings');
+  const filename = '共页-我的数据.json';
+  if (isRemote) {
+    try {
+      await fileApi.download('/api/me/export', filename);
+    } catch (error) {
+      toast(error.message || '导出失败', 'error');
+    }
+    return undefined;
+  }
+  const data = S.personalData(ctx.db, ctx.me.id);
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  downloadFile(url, filename);
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return undefined;
+}
+
+function openShareModal(path, kind = 'invite') {
   const url = absoluteShare(path);
+  const isInvite = kind === 'invite';
   openModal({
     title: '分享链接',
-    body: `<p class="small secondary mb-3">复制下面的地址，发到班群或直接发给同学。打开链接的人先看到内容，登录后才会确认加入。</p>
+    body: `<p class="small secondary mb-3">${isInvite
+      ? '复制下面的地址，发到班群或直接发给同学。打开链接的人先看到内容，登录后才会确认加入。'
+      : '复制下面的地址，发到班群或直接发给同学。'}</p>
       <div class="invite-box">
         <input class="input" id="share-url" value="${esc(url)}" readonly>
         <button class="btn" type="button" data-action="copy-value" data-value="${esc(url)}">复制</button>
       </div>
-      <p class="tiny muted mt-3">邀请码只是来源标识，不是访问密码，也不代表正式修课认证。</p>`,
+      ${isInvite ? '<p class="tiny muted mt-3">邀请码只是来源标识，不是访问密码，也不代表正式修课认证。</p>' : ''}`,
     footer: `<button class="btn btn-ghost" type="button" data-action="close-modal">关闭</button>`
   });
 }
@@ -802,31 +1086,6 @@ async function handleAction(action, el) {
   switch (action) {
     case 'close-modal':
       return closeModal();
-    case 'circle-guest-info':
-      return openModal({
-        title: '游客可以做什么',
-        body: `<p class="small secondary">游客可以浏览公开讨论。登录并验证邮箱后，可以发帖、评论和收藏。</p>`,
-        footer: `<a class="btn" href="${href('/login', { next: '/circles' })}">登录 / 注册</a>
-          <button class="btn btn-ghost" type="button" data-action="close-modal">关闭</button>`
-      });
-    case 'direct-mode-info':
-      return openModal({
-        title: '私信说明',
-        body: `<p class="small secondary">${isRemote
-          ? '私信由服务端保存，只对对话双方开放；打开私信页时会自动刷新新消息。'
-          : '当前是静态演示版，私信只保存在这台浏览器，不会送到其他人的设备。部署并启用服务端后，登录账号之间才能互发。'}</p>`,
-        footer: `<button class="btn btn-ghost" type="button" data-action="close-modal">知道了</button>`
-      });
-    case 'compose-info':
-      return openModal({
-        title: '发布说明',
-        body: `<div class="stack small secondary">
-          <p>已发布内容对所有访问者可见，请勿写入个人隐私；课友圈不是班级私密群。</p>
-          <p>挂圈后课程由所选课友圈决定；正文支持基础 Markdown。</p>
-          <p>板块：笔记分享、学习求助、课程讨论、学习方法。</p>
-        </div>`,
-        footer: `<button class="btn btn-ghost" type="button" data-action="close-modal">知道了</button>`
-      });
     case 'confirm-yes': {
       const fn = ui.pendingConfirm;
       closeModal();
@@ -836,15 +1095,25 @@ async function handleAction(action, el) {
     case 'download': {
       const result = await invoke('downloadResource', { postId: dataset.post, attachmentId: dataset.attachment });
       if (result.ok) downloadFile(result.data.path, result.data.name);
-      else if (result.code === 'login') requireLogin(`/posts/${dataset.post}`);
+      else if (result.code === 'login') requireLogin(dataset.next || `/posts/${dataset.post}`);
       return undefined;
     }
     case 'toggle-like':
       if (!ctx.me) return requireLogin(`/posts/${dataset.post}`);
       return invoke('toggleReaction', { postId: dataset.post, kind: 'like' });
     case 'toggle-save':
-      if (!ctx.me) return requireLogin(`/posts/${dataset.post}`);
+      if (!ctx.me) return requireLogin(dataset.next || `/posts/${dataset.post}`);
       return invoke('toggleReaction', { postId: dataset.post, kind: 'save' });
+    case 'goto-comments':
+      return jumpToComments({ focus: !isTouchPointer() });
+    case 'scroll-to': {
+      const target = viewEl.querySelector(`#${dataset.target}`);
+      if (target) target.scrollIntoView({ block: 'center', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+      return undefined;
+    }
+    case 'toggle-filters':
+      ui.filtersOpen = !ui.filtersOpen;
+      return ctx.refresh();
     case 'open-gift':
       return openGiftModal(dataset.post);
     case 'send-gift': {
@@ -865,7 +1134,7 @@ async function handleAction(action, el) {
       return result;
     }
     case 'join-circle':
-      if (!ctx.me) return requireLogin(`/invite/${dataset.code || ''}`);
+      if (!ctx.me) return requireLogin(dataset.code ? `/invite/${dataset.code}` : null);
       return invoke('joinCircle', { circleId: dataset.circle, code: dataset.code || null });
     case 'leave-circle':
       return confirmModal({
@@ -932,13 +1201,18 @@ async function handleAction(action, el) {
     case 'copy-value':
       return copyText(dataset.value || '');
     case 'share':
-      return openShareModal(el.dataset.path || '');
+      return openShareModal(el.dataset.path || '', dataset.kind || 'invite');
     case 'mark-all-read':
       if (!ctx.me) return requireLogin('/me/messages');
       return invoke('markAllNotificationsRead', {});
     case 'mark-read':
       if (!ctx.me) return requireLogin('/me/messages');
       return invoke('markNotificationRead', { notificationId: dataset.notification });
+    case 'open-notification':
+      if (!ctx.me) return requireLogin('/me/messages');
+      await invoke('markNotificationRead', { notificationId: dataset.notification }, { silent: true });
+      navigate(dataset.href);
+      return undefined;
     case 'open-direct-thread': {
       if (!ctx.me) return requireLogin('/me/messages');
       const peerId = dataset.peer;
@@ -950,7 +1224,7 @@ async function handleAction(action, el) {
       if (!ctx.me) return requireLogin('/me/messages');
       return invoke('markDirectMessagesRead', { peerId: dataset.peer });
     case 'quick-login': {
-      if (isRemote) return toast('试用版已关闭演示账号切换，请用名单内邮箱登录', 'error');
+      if (!isDemo) return toast('请使用已配置域名的邮箱登录；演示账号仅用于独立本地演示。', 'error');
       const result = await invoke('quickLogin', { userId: dataset.user });
       if (result.ok) {
         const next = new URLSearchParams(location.hash.split('?')[1] || '').get('next');
@@ -959,11 +1233,17 @@ async function handleAction(action, el) {
       }
       return result;
     }
-    case 'logout':
-      await invoke('logout', {});
+    case 'logout': {
+      const result = await invoke('logout', {});
+      if (!result.ok) return result;
       auth.clear();
+      ui.files = [];
+      ui.images = [];
+      ui.editorDrafts.clear();
+      clearComposeDraft();
       navigate('/resources');
-      return undefined;
+      return result;
+    }
     case 'reset-demo':
       if (isRemote) return toast('试用版不支持重置，请联系管理员清空服务端数据', 'error');
       return confirmModal({
@@ -1016,17 +1296,21 @@ async function handleAction(action, el) {
         preview.innerHTML = '';
       }
       return undefined;
-    }    case 'add-file': {
+    }
+    case 'add-file': {
+      if (isRemote) return viewEl.querySelector('input[data-upload="pdf"]')?.click();
+      if (!isDemo) return;
       const select = viewEl.querySelector('[data-file-picker]');
       if (!select) return undefined;
       const option = A.DEMO_SAMPLE_FILES[Number(select.value)];
       if (!option) return undefined;
       if (ui.files.length >= 3) return toast('最多 3 个 PDF 附件', 'error');
       if (ui.files.some((f) => f.path === option.path)) return toast('这个演示文件已经添加过了', 'error');
-      ui.files.push({ ...option });
+      ui.files.push({ ...option, demo: true });
       return ctx.refresh();
     }
     case 'remove-file':
+      if (ui.uploading || ui.publishing) return;
       ui.files = ui.files.filter((_, index) => String(index) !== dataset.index);
       return ctx.refresh();
     case 'save-resource-draft': {
@@ -1041,7 +1325,9 @@ async function handleAction(action, el) {
           term: String(fd.get('term') || ''),
           type: String(fd.get('type') || ''),
           coverage: String(fd.get('coverage') || ''),
-          limitations: String(fd.get('limitations') || '')
+          limitations: String(fd.get('limitations') || ''),
+          source: String(fd.get('source') || ''),
+          rights: String(fd.get('rights') || '')
         },
         postTitle: String(fd.get('postTitle') || ''),
         body: String(fd.get('body') || '')
@@ -1060,7 +1346,9 @@ async function handleAction(action, el) {
             term: String(fd.get('term') || ''),
             type: String(fd.get('type') || ''),
             coverage: String(fd.get('coverage') || ''),
-            limitations: String(fd.get('limitations') || '')
+            limitations: String(fd.get('limitations') || ''),
+            source: String(fd.get('source') || ''),
+            rights: String(fd.get('rights') || '')
           },
           postTitle: String(fd.get('postTitle') || ''),
           body: String(fd.get('body') || '')
@@ -1070,8 +1358,58 @@ async function handleAction(action, el) {
       return undefined;
     }
     case 'remove-image':
-      ui.images = ui.images.filter((_, index) => String(index) !== dataset.index);
+      ui.images = ui.images.filter((image, index) => {
+        if (String(index) !== dataset.index) return true;
+        releaseImage(image);
+        return false;
+      });
       return ctx.refresh();
+    case 'block-user':
+      if (!ctx.me) return requireLogin();
+      if (dataset.value === '1') {
+        return confirmModal({
+          title: '拉黑这个账号',
+          text: '拉黑后双方不能再互发私信，你也不会再收到对方的回复和页签提醒，互相取消关注。对方的公开内容仍然可见。',
+          confirmLabel: '拉黑',
+          danger: true,
+          onConfirm: () => invoke('setBlock', { userId: dataset.user, blocked: true })
+        });
+      }
+      return invoke('setBlock', { userId: dataset.user, blocked: false });
+    case 'report-dm':
+      return openReportModal('dm', dataset.peer);
+    case 'export-my-data':
+      return exportMyData();
+    case 'open-delete-account':
+      return openDeleteAccountModal();
+    case 'admin-member':
+      return openMemberModal(dataset);
+    case 'admin-member-quick':
+      return invoke('setMemberRestriction', { circleId: dataset.circle, userId: dataset.user, action: dataset.act });
+    case 'pin-post':
+      return invoke('setCirclePin', { circleId: dataset.circle, postId: dataset.value === '1' ? dataset.post : null });
+    case 'admin-approve-application':
+      return confirmModal({
+        title: '通过建圈申请',
+        text: '通过后会开通这门课的课友圈；目录里没有的课程会一并加入目录，并通知申请人。',
+        confirmLabel: '通过并开圈',
+        onConfirm: () => invoke('resolveApplication', { applicationId: dataset.application, action: 'approve' })
+      });
+    case 'admin-reject-application':
+      return openModal({
+        title: '驳回建圈申请',
+        body: `<form data-form="admin-reject-application" data-application="${esc(dataset.application)}">
+          <div class="field">
+            <label for="reject-reason">驳回理由（会通知申请人）</label>
+            <textarea class="textarea textarea-sm" id="reject-reason" name="reason" rows="2" required
+              placeholder="例如：目录里已有同名课程，请直接搜索加入"></textarea>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-ghost" type="button" data-action="close-modal">取消</button>
+            <button class="btn" type="submit">驳回</button>
+          </div>
+        </form>`
+      });
     case 'toggle-preview': {
       const area = viewEl.querySelector('textarea[name="body"]');
       if (!area) return undefined;
@@ -1082,27 +1420,17 @@ async function handleAction(action, el) {
     case 'set-board': {
       ui.compose = ui.compose || { board: 'notes', preview: false };
       ui.compose.board = dataset.board || 'notes';
-      return ctx.refresh();
+      if (ui.composeDraft) ui.composeDraft.board = ui.compose.board;
+      ctx.refresh();
+      return persistComposeDraft();
     }
+    case 'clear-compose-draft':
+      clearComposeDraft();
+      ui.compose = { board: 'notes', preview: false };
+      return render({ preserve: true });
     case 'send-code': {
       const input = viewEl.querySelector('input[name="email"]');
-      const email = input ? input.value : '';
-      const hint = viewEl.querySelector('[data-code-hint]');
-      if (isCloudAuth) {
-        const sent = await cloudAuth.sendCode(email);
-        if (hint) hint.textContent = sent.message;
-        if (sent.ok) {
-          toast(`验证码已发到 ${sent.email}`, 'ok');
-          const codeInput = viewEl.querySelector('input[name="code"]');
-          if (codeInput) codeInput.focus({ preventScroll: true });
-        } else {
-          toast(sent.message, 'error');
-        }
-        return sent;
-      }
-      const result = await invoke('requestCode', { email });
-      if (result.ok && hint) hint.textContent = '验证码固定为 123456，不会真的发送邮件。';
-      return result;
+      return requestLoginCode(input?.value || '');
     }
     case 'admin-archive-circle': {
       if (!ctx.me || ctx.me.role !== 'admin') return toast('需要管理员权限', 'error');
@@ -1148,35 +1476,11 @@ async function handleAction(action, el) {
     case 'level-info': {
       const level = Number(dataset.level) || 1;
       const name = dataset.name || '';
-      const rewards = GROWTH_RULES.rewards;
-      const levelRows = GROWTH_RULES.levels.map((item) => `<li>
-        <span>LV.${item.level} ${esc(item.name)}</span>
-        <span>${item.threshold === 0 ? '起点' : `${item.threshold} 经验`}</span>
-      </li>`).join('');
-      const rewardRows = [
-        { label: '合格帖子', value: `+${rewards.post.xp}`, detail: `每天最多 ${rewards.post.daily} 篇，正文至少 ${rewards.post.minChars} 个有效字` },
-        { label: '有内容的评论或回复', value: `+${rewards.comment.xp}`, detail: `每天最多 ${rewards.comment.daily} 条，同一帖子最多 ${rewards.comment.perPostDaily} 条` },
-        { label: '求助回复被采纳', value: `+${rewards.accepted.xp}`, detail: `每天最多 ${rewards.accepted.daily} 次，同一提问者最多 ${rewards.accepted.perAskerDaily} 次` },
-        { label: '收到同学送的页签', value: `+${rewards.marker.xp}`, detail: `每天最多 ${rewards.marker.daily} 枚，同一赠送者最多 1 次` }
-      ].map((item) => `<li>
-        <span><b>${esc(item.label)} ${esc(item.value)}</b><small>${esc(item.detail)}</small></span>
-      </li>`).join('');
       return openModal({
         title: `LV.${level} ${name}`,
-        body: `<div class="level-info-body">
-          <p class="small secondary">等级只体现参与程度，不代表知识水平、校方认证，也不影响下载、提问和评论等基本权利。</p>
-          <div class="mt-3">
-            <div class="small"><b>等级门槛</b></div>
-            <ul class="level-info-list tiny muted">${levelRows}</ul>
-          </div>
-          <div class="mt-3">
-            <div class="small"><b>经验来源</b></div>
-            <ul class="level-info-list level-reward-list tiny muted">${rewardRows}</ul>
-          </div>
-          <p class="tiny muted mt-2">点赞、收藏、下载、领取或赠送页签不加经验；删除或违规内容可能撤回对应经验。</p>
-        </div>`,
-        footer: `${ctx.me ? `<a class="btn btn-sm" href="${href('/me/growth')}">我的成长</a>` : ''}
-          <button class="btn btn-ghost btn-sm" type="button" data-action="close-modal">关闭</button>`
+        body: `<p class="small secondary">等级只表示参与积累，不代表学术水平、正确性或校方认证。经验来自合格帖子、评论与求助帖采纳；删除或违规会撤回对应经验。</p>
+          <p class="tiny muted mt-2">经验来自合格帖子、评论、采纳与收到的页签；领取/赠送页签不加经验。等级不限制下载、提问和评论，也不带来管理权限。</p>`,
+        footer: `<a class="btn btn-sm" href="${href('/me/growth')}">查看我的成长</a>`
       });
     }
     case 'preview-image':
@@ -1203,47 +1507,32 @@ async function handleSubmit(form) {
     return;
   }
 
-  if (kind === 'login-request') {
-    if (isCloudAuth) {
-      const sent = await cloudAuth.sendCode(get('email'));
-      const hint = viewEl.querySelector('[data-code-hint]');
-      if (hint) hint.textContent = sent.message;
-      toast(sent.message, sent.ok ? 'ok' : 'error');
-      return;
-    }
-    const result = await invoke('requestCode', { email: get('email') });
-    const hint = viewEl.querySelector('[data-code-hint]');
-    if (result.ok && hint) hint.textContent = '验证码固定为 123456（不会真的发送邮件）。';
-    return;
-  }
+  if (kind === 'login-request') return requestLoginCode(get('email'));
 
   if (kind === 'login-verify') {
+    if (!authAvailable()) return toast('真实邮件服务尚未就绪，暂不能登录。', 'error');
+    if (!form.querySelector('[name="agree"]')?.checked) return toast('请先阅读并主动勾选登录与资料分享说明。', 'error');
+    if (ui.verifying) return;
     const next = new URLSearchParams(location.hash.split('?')[1] || '').get('next');
-
-    if (isCloudAuth) {
-      // 第一步：把验证码交给云服务验，确认这个邮箱是本人的
-      const verified = await cloudAuth.verifyCode(get('code'));
-      if (!verified.ok) {
-        toast(verified.message, 'error');
-        return;
-      }
-      // 第二步：后端按邮箱找回/创建账号并签发会话（后端会再校验一次域名）
-      const result = await invoke('cloudSignIn', {
-        email: verified.email,
-        cloudAccessToken: verified.accessToken
-      });
-      if (result && result.ok) {
+    ui.verifying = true;
+    refreshPreserving();
+    try {
+      const result = await invoke('verifyCode', { email: get('email'), code: get('code'), agree: true });
+      if (result.ok) {
+        ui.codeRetryAt = 0;
+        ui.codeHint = '';
         const user = result.data && result.data.user;
         navigate(next || (user && user.role === 'admin' ? '/admin' : '/resources'));
       }
-      return;
+      return result;
+    } finally {
+      ui.verifying = false;
+      refreshPreserving();
     }
+  }
 
-    const result = await invoke('verifyCode', { email: get('email'), code: get('code') });
-    if (result.ok) {
-      const user = result.data && result.data.user;
-      navigate(next || (user && user.role === 'admin' ? '/admin' : '/resources'));
-    }
+  if (kind === 'admin-application') {
+    await invoke('reviewApplication', { applicationId: form.dataset.application, approved: get('approved') === 'yes', reason: get('reason') });
     return;
   }
 
@@ -1262,21 +1551,6 @@ async function handleSubmit(form) {
     if (result.ok) {
       ui.replyTarget = null;
       ui.freshCommentId = result.data && result.data.comment ? result.data.comment.id : null;
-      ctx.refresh();
-    }
-    return;
-  }
-
-  if (kind === 'direct-message') {
-    if (!ctx.me) return requireLogin('/me/messages');
-    const result = await invoke('sendDirectMessage', {
-      recipientId: form.dataset.recipient,
-      body: get('body')
-    });
-    if (result.ok) {
-      const currentForm = viewEl.querySelector('form[data-form="direct-message"]');
-      const currentBody = currentForm && currentForm.elements.namedItem('body');
-      if (currentBody) currentBody.value = '';
       ctx.refresh();
     }
     return;
@@ -1311,7 +1585,8 @@ async function handleSubmit(form) {
   if (kind === 'edit-post') {
     const tags = String(fd.get('tags') || '').split(/[,，\s]+/).filter(Boolean).slice(0, 3);
     const result = await invoke('updatePost', {
-      postId: form.dataset.post, title: get('title'), body: get('body'), tags
+      postId: form.dataset.post, title: get('title'), body: get('body'), tags,
+      term: get('postTerm'), chapter: get('chapter')
     });
     if (result.ok) navigate(`/posts/${form.dataset.post}`);
     return;
@@ -1321,16 +1596,49 @@ async function handleSubmit(form) {
     invoke('updatePrefs', {
       patch: {
         replies: fd.get('replies') === 'on',
-        gifts: fd.get('gifts') === 'on',
-        system: fd.get('system') === 'on'
+        gifts: fd.get('gifts') === 'on'
       }
     });
     return;
   }
 
   if (kind === 'application') {
-    const result = await invoke('submitApplication', { courseId: get('courseId'), reason: get('reason') });
-    if (result.ok) form.reset();
+    const result = await invoke('submitApplication', { courseName: get('courseName'), reason: get('reason') });
+    if (result.ok) {
+      const current = viewEl.querySelector('form[data-form="application"]');
+      if (current) current.reset();
+    }
+    return;
+  }
+
+  if (kind === 'delete-account') {
+    const result = await invoke('deleteAccount', { mode: get('mode'), confirmText: get('confirmText') });
+    if (result && result.ok) {
+      closeModal();
+      auth.clear();
+      clearComposeDraft();
+      navigate('/');
+    }
+    return;
+  }
+
+  if (kind === 'admin-member') {
+    const result = await invoke('setMemberRestriction', {
+      circleId: form.dataset.circle,
+      userId: form.dataset.user,
+      action: form.dataset.act,
+      days: get('days') ? Number(get('days')) : null,
+      reason: get('reason')
+    });
+    if (result && result.ok) closeModal();
+    return;
+  }
+
+  if (kind === 'admin-reject-application') {
+    const result = await invoke('resolveApplication', {
+      applicationId: form.dataset.application, action: 'reject', reason: get('reason')
+    });
+    if (result.ok) closeModal();
     return;
   }
 
@@ -1389,22 +1697,66 @@ function buildFilterPath(base, params) {
   return q ? `${base}?${q}` : base;
 }
 
+function publicationAttachments() {
+  return ui.files.map((file) => isRemote ? { uploadId: file.uploadId } : {
+    name: file.name, sizeBytes: file.sizeBytes, pages: file.pages, path: file.path, status: 'ready'
+  });
+}
+
+function validatePublication(form, { resource = false, requireFile = false } = {}) {
+  if (ui.uploading || ui.publishing) return '附件上传或发布尚未完成，请稍等。';
+  if (!form.querySelector('[name="original"]')?.checked) return '请主动勾选文档来源合法与分享权利确认。';
+  if (requireFile && !ui.files.length) return '请先上传至少 1 个通过检查的 PDF。';
+  if (isRemote && ui.files.some((file) => !file.uploadId || file.status !== 'ready')) return '附件未通过服务器检查，请移除后重新上传。';
+  if (isRemote && (resource || ui.files.length)) {
+    const source = form.querySelector('[name="source"]')?.value.trim() || '';
+    const rights = form.querySelector('[name="rights"]')?.value || '';
+    if (source.length < 4) return '请填写至少 4 字的资料来源，说明作者与出处或授权依据。';
+    if (!['原创', '已授权', '公开许可'].includes(rights)) return '请选择原创、已授权或公开许可。';
+  }
+  return '';
+}
+
+async function publishContent(payload, editor) {
+  ui.publishing = true;
+  if (isRemote) ui.editorDrafts.set(editor, snapshotFields());
+  refreshPreserving();
+  try {
+    const result = await invoke('createPost', payload);
+    if (result.ok) {
+      ui.files = [];
+      ui.images = [];
+      ui.uploadError = '';
+      ui.editorDrafts.delete(editor);
+      ui.justPublished = editor;
+    }
+    return result;
+  } finally {
+    ui.publishing = false;
+    refreshPreserving();
+  }
+}
+
 async function submitPost(form) {
   const fd = new FormData(form);
+  const failure = validatePublication(form, { resource: fd.get('confirmIndex') === 'on' });
+  if (failure) return toast(failure, 'error');
   const board = (ui.compose && ui.compose.board) || 'notes';
   const circleId = String(fd.get('circleId') || '');
   const tags = String(fd.get('tags') || '').split(/[,，\s]+/).filter(Boolean).slice(0, 3);
   const body = String(fd.get('body') || '');
   const title = String(fd.get('title') || '');
-  const courseId = String(fd.get('courseId') || '') || null;
-
-  if (pendingImageCount) {
-    toast('图片仍在读取，请稍候再发布。');
+  const circle = circleId ? S.circleOf(ctx.db, circleId) : null;
+  const courseId = circle?.courseId || String(fd.get('courseId') || '') || null;
+  if (isRemote && !circleId && (!courseId || !S.courseOf(ctx.db, courseId))) {
+    return toast('请先选择这篇讨论对应的具体课程。', 'error');
+  }
+  if (!body.trim()) {
+    showFieldError(form, 'body', '正文不能为空，写几句再发布吧。');
     return;
   }
-  const imageBytes = ui.images.reduce((sum, image) => sum + (Number(image.sizeBytes) || 0), 0);
-  if (ui.images.length > MAX_POST_IMAGE_COUNT || imageBytes > MAX_POST_IMAGE_BYTES) {
-    toast(`图片超过当前模式的单帖上限（原文件合计 ${formatImageBytes(MAX_POST_IMAGE_BYTES)}），请移除部分图片。`, 'error');
+  if (pendingImageCount || filesUploading()) {
+    toast('图片或文件还在处理，请稍候再发布。');
     return;
   }
 
@@ -1413,28 +1765,39 @@ async function submitPost(form) {
   const derivedTitle = (title || body.trim().split('\n')[0] || '学习资料').slice(0, 80);
   const resource = withResource ? {
     title: derivedTitle,
-    courseId: String(fd.get('resourceCourse') || '') || null,
+    courseId: isRemote ? courseId : String(fd.get('resourceCourse') || '') || null,
     school: String(fd.get('school') || ''),
     term: String(fd.get('term') || ''),
     type: String(fd.get('type') || ''),
     coverage: String(fd.get('coverage') || ''),
     limitations: String(fd.get('limitations') || ''),
+    source: String(fd.get('source') || ''),
+    rights: String(fd.get('rights') || ''),
     confirmedIndex: true
   } : null;
 
-  const result = await invoke('createPost', {
+  const result = await publishContent({
     board, circleId: circleId || null, courseId, title, body, tags,
-    images: ui.images.map((img) => img.dataUrl),
-    attachments: ui.files.map((file) => ({
-      name: file.name, sizeBytes: file.sizeBytes, pages: file.pages, path: file.path, status: 'ready'
-    })),
+    term: String(fd.get('postTerm') || resource?.term || ''),
+    chapter: String(fd.get('chapter') || ''),
+    source: String(fd.get('source') || ''),
+    rights: String(fd.get('rights') || ''),
+    images: isRemote ? ui.images.map((img) => img.uploadId).filter(Boolean) : ui.images.map((img) => img.dataUrl),
+    attachments: publicationAttachments(),
     confirmedOriginal: fd.get('original') === 'on',
     stickerId: String(fd.get('stickerId') || '') || null,
     resource
-  });
+  }, 'compose');
 
+  if (!result.ok && result.code === 'need_confirm') {
+    // 动作返回后页面已重绘，要从当前视图取勾选框
+    const confirmBox = viewEl.querySelector('form[data-form="post"] input[name="original"]');
+    if (confirmBox && confirmBox.offsetParent) confirmBox.focus();
+  }
   if (result.ok) {
     discardPendingImages();
+    clearComposeDraft();
+    ui.images.forEach(releaseImage);
     ui.images = [];
     ui.files = [];
     if (ui.compose) ui.compose.preview = false;
@@ -1447,8 +1810,106 @@ async function submitPost(form) {
   }
 }
 
+function showFieldError(form, name, message) {
+  const field = form.elements.namedItem(name);
+  const error = form.querySelector(`[data-field-error="${name}"]`);
+  if (error) {
+    error.textContent = message;
+    error.hidden = false;
+  }
+  if (field) {
+    field.setAttribute('aria-invalid', 'true');
+    field.focus();
+  }
+}
+
+/* ---------- 发帖内容暂存：只存在这台设备，发布或清空后删除 ---------- */
+
+function draftStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function restoreComposeDraft() {
+  ui.composeDraftLoaded = true;
+  ui.composeRestored = false;
+  ui.composeDraft = null;
+  const storage = draftStorage();
+  if (!storage) return;
+  try {
+    const saved = JSON.parse(storage.getItem(COMPOSE_DRAFT_KEY) || 'null');
+    if (!saved || saved.userId !== ctx.me.id || !(saved.title || saved.body || saved.tags)) return;
+    ui.composeDraft = saved;
+    ui.composeRestored = true;
+    ui.compose = { board: saved.board || 'notes', preview: false };
+  } catch {
+    /* 暂存内容损坏时当作没有 */
+  }
+}
+
+function readComposeForm(form) {
+  const value = (name) => {
+    const field = form.elements.namedItem(name);
+    return field ? field.value : '';
+  };
+  return {
+    userId: ctx.me ? ctx.me.id : null,
+    title: value('title'),
+    body: value('body'),
+    tags: value('tags'),
+    circleId: value('circleId'),
+    courseId: value('courseId'),
+    board: (ui.compose && ui.compose.board) || 'notes'
+  };
+}
+
+let composeDraftTimer = 0;
+
+function persistComposeDraft() {
+  window.clearTimeout(composeDraftTimer);
+  composeDraftTimer = window.setTimeout(() => {
+    const storage = draftStorage();
+    if (!storage) return;
+    const draft = ui.composeDraft;
+    try {
+      if (draft && (draft.title || draft.body || draft.tags)) storage.setItem(COMPOSE_DRAFT_KEY, JSON.stringify(draft));
+      else storage.removeItem(COMPOSE_DRAFT_KEY);
+    } catch {
+      /* 存储满或被禁用时不影响发布 */
+    }
+  }, 300);
+}
+
+function clearComposeDraft() {
+  window.clearTimeout(composeDraftTimer);
+  ui.composeDraft = null;
+  ui.composeRestored = false;
+  const storage = draftStorage();
+  if (!storage) return;
+  try {
+    storage.removeItem(COMPOSE_DRAFT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 文档来源确认只在带图片、附件或收录到找资料时出现 */
+function syncSourceConfirm() {
+  const form = viewEl.querySelector('form[data-form="post"]');
+  const box = form && form.querySelector('[data-source-confirm]');
+  if (!box) return;
+  const indexing = form.elements.namedItem('confirmIndex');
+  box.hidden = !(ui.images.length || ui.files.length || (indexing && indexing.checked));
+}
+
 async function submitResource(form) {
+  const failure = validatePublication(form, { resource: true, requireFile: true });
+  if (failure) return toast(failure, 'error');
   const fd = new FormData(form);
+  if (fd.get('confirmIndex') !== 'on') return toast('请主动确认公开资料元信息和预览并收录到找资料。', 'error');
   const tags = String(fd.get('tags') || '').split(/[,，\s]+/).filter(Boolean).slice(0, 3);
   const courseId = String(fd.get('resourceCourse') || '');
 
@@ -1469,20 +1930,24 @@ async function submitResource(form) {
   };
   if (!courseId) return failField('请选择这份资料对应的课程。');
   if (!S.courseOf(ctx.db, courseId)) return failField('这份课程不在可选范围，请重新选择。');
+  if (filesUploading()) {
+    toast('文件还在上传，请稍候再发布。');
+    return { ok: false };
+  }
   if (errorEl) errorEl.hidden = true;
   if (selectEl) selectEl.removeAttribute('aria-invalid');
 
-  const result = await invoke('createPost', {
+  const result = await publishContent({
     board: 'notes',
     circleId: String(fd.get('circleId') || '') || null,
-    courseId: String(fd.get('courseId') || '') || null,
+    courseId,
+    term: String(fd.get('term') || ''),
+    chapter: String(fd.get('chapter') || ''),
     title: String(fd.get('postTitle') || ''),
     body: String(fd.get('body') || ''),
     tags,
     images: [],
-    attachments: ui.files.map((file) => ({
-      name: file.name, sizeBytes: file.sizeBytes, pages: file.pages, path: file.path, status: 'ready'
-    })),
+    attachments: publicationAttachments(),
     confirmedOriginal: fd.get('original') === 'on',
     stickerId: String(fd.get('stickerId') || '') || null,
     resource: {
@@ -1493,9 +1958,11 @@ async function submitResource(form) {
       type: String(fd.get('type') || ''),
       coverage: String(fd.get('coverage') || ''),
       limitations: String(fd.get('limitations') || ''),
+      source: String(fd.get('source') || ''),
+      rights: String(fd.get('rights') || ''),
       confirmedIndex: fd.get('confirmIndex') === 'on'
     }
-  });
+  }, 'resourcePublish');
   if (result.ok) {
     ui.files = [];
     const resource = (ctx.db.resources || []).find((r) => r.postId === result.data.postId);
@@ -1504,81 +1971,223 @@ async function submitResource(form) {
   return result;
 }
 
-function parseImages(files) {
-  const accepted = [];
+async function uploadPdfFiles(files, form) {
+  if (!isRemote) return;
+  if (!ctx.me) return requireLogin();
+  if (ui.uploading || ui.publishing) return toast('请等待当前上传或发布结束。', 'error');
+  if (config.filePolicy?.uploadReady === false) return toast('文件上传或扫描服务暂不可用，请联系维护者。', 'error');
+  if (!form?.querySelector('[name="original"]')?.checked) return toast('请先主动勾选文档来源合法与分享权利确认，再选择文件。', 'error');
+  const ownerId = ctx.me.id;
+  const selected = Array.from(files);
+  if (selected.length + ui.files.length > 3) return toast('一次发布最多 3 个 PDF，请重新选择。', 'error');
+  const maxBytes = Math.min(20971520, Number(config.filePolicy?.maxBytes) || 20971520);
+  const invalid = selected.find((file) => !(file.type === 'application/pdf' || (!file.type && /\.pdf$/i.test(file.name))) || file.size <= 0 || file.size > maxBytes);
+  if (invalid) return toast(`${invalid.name}：仅支持非空 PDF，单个不超过 ${Math.round(maxBytes / 1024 / 1024)} MiB。`, 'error');
+  ui.uploading = true;
+  ui.uploadError = '';
+  try {
+    for (const file of selected) {
+      if (ctx.me?.id !== ownerId) return;
+      ui.uploadName = file.name;
+      refreshPreserving();
+      try {
+        const { attachment } = await api.uploadFile(file);
+        if (ctx.me?.id !== ownerId) return;
+        // 仅保留服务器回执，绝不把 File、任意路径或客户端声明的 ready 序列化到发布请求。
+        ui.files.push({ uploadId: attachment.uploadId, name: attachment.name, sizeBytes: attachment.sizeBytes, pages: attachment.pages, status: attachment.status });
+        toast(`${attachment.name} 已通过服务器检查`, 'ok');
+      } catch (error) {
+        ui.uploadError = `${file.name}：${error.message || '上传失败'}，未添加此附件，草稿仍保留。`;
+        if (error.status === 503) {
+          ui.uploadError += ' 上传或扫描服务尚未就绪，请联系维护者。';
+          config.filePolicy = { ...config.filePolicy, uploadReady: false };
+        }
+        toast(ui.uploadError, 'error');
+        if (error.status === 503) break;
+      }
+    }
+  } finally {
+    ui.uploading = false;
+    ui.uploadName = '';
+    refreshPreserving();
+  }
+}
+
+/* ---------- 图片与文件 ---------- */
+
+const filesUploading = () => ui.files.some((file) => file.status === 'uploading');
+
+/** 已上传的文件只提交 ID，名称和大小以服务端记录为准；演示文件照旧提交示例路径 */
+function attachmentForSubmit(file) {
+  return file.uploadId
+    ? { uploadId: file.uploadId }
+    : { name: file.name, sizeBytes: file.sizeBytes, pages: file.pages, path: file.path, status: 'ready' };
+}
+
+function releaseImage(image) {
+  if (image && image.uploadId && String(image.dataUrl).startsWith('blob:')) URL.revokeObjectURL(image.dataUrl);
+}
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('图片无法读取'));
+    };
+    img.src = url;
+  });
+}
+
+/* imageOrientation: 'from-image' 是较新的写法，旧浏览器会直接报错；失败时退回 <img> 解码，
+ * 现代浏览器绘制 <img> 时同样按 EXIF 方向摆正 */
+async function decodeImage(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch {
+      /* 退回下面的 <img> 解码 */
+    }
+  }
+  return loadImageElement(file);
+}
+
+/** 缩到长边 1920 并重新编码：手机照片从几 MB 降到几百 KB，同时去掉拍摄位置等 EXIF 信息 */
+async function prepareImage(file) {
+  let source;
+  try {
+    source = await decodeImage(file);
+  } catch {
+    throw new Error('图片无法读取，换一张试试');
+  }
+  const width = source.naturalWidth || source.width;
+  const height = source.naturalHeight || source.height;
+  const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(width, height));
+  // 小的 PNG（截图、板书）保持原样，避免文字被压糊；PNG 没有拍摄位置信息
+  if (file.type === 'image/png' && scale === 1 && file.size <= 1.5 * 1024 * 1024) {
+    if (source.close) source.close();
+    return file;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const paint = canvas.getContext('2d');
+  paint.fillStyle = '#fff';
+  paint.fillRect(0, 0, canvas.width, canvas.height);
+  paint.drawImage(source, 0, 0, canvas.width, canvas.height);
+  if (source.close) source.close();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+  if (!blob) throw new Error('图片压缩失败，换一张试试');
+  return blob;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('图片读取失败，请重试'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function parseImages(fileList) {
   const generation = imageReadGeneration;
-  Array.from(files).forEach((file) => {
+  Array.from(fileList).forEach((file) => {
     if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
       toast(`${file.name}：只支持 JPEG、PNG、WebP`, 'error');
       return;
     }
     if (file.size > MAX_IMAGE_FILE_BYTES) {
-      toast(`${file.name}：单张不能超过 10 MiB`, 'error');
+      toast(`${file.name}：单张不能超过 25 MiB`, 'error');
       return;
     }
-    if (ui.images.length + pendingImageCount >= MAX_POST_IMAGE_COUNT) {
-      toast(`${file.name}：单帖最多 ${MAX_POST_IMAGE_COUNT} 张图片`, 'error');
+    if (file.size > 800 * 1024) {
+      toast(`${file.name}：演示模式只内联 800 KiB 以内的图片`, 'error');
       return;
     }
-    const currentBytes = ui.images.reduce((sum, image) => sum + (Number(image.sizeBytes) || 0), 0);
-    if (currentBytes + pendingImageBytes + file.size > MAX_POST_IMAGE_BYTES) {
-      toast(`${file.name}：当前模式单帖图片原文件总量上限为 ${formatImageBytes(MAX_POST_IMAGE_BYTES)}`, 'error');
-      return;
-    }
-
-    // 先同步占用预算，再启动异步读取；紧接着选的另一批图片也会计入剩余容量。
-    pendingImageBytes += file.size;
     pendingImageCount += 1;
-    const reader = new FileReader();
-    pendingImageReaders.add(reader);
-    const releaseReservation = () => {
+    const finish = () => {
       if (generation !== imageReadGeneration) return false;
-      pendingImageReaders.delete(reader);
-      pendingImageBytes = Math.max(0, pendingImageBytes - file.size);
       pendingImageCount = Math.max(0, pendingImageCount - 1);
+      ui.pendingImages = pendingImageCount;
       return true;
     };
-    reader.onload = () => {
-      if (!releaseReservation()) return;
-      if (typeof reader.result !== 'string') {
-        toast(`${file.name}：图片读取失败，请重试。`, 'error');
-        ctx.refresh();
-        return;
+    prepareImage(file).then(async (blob) => {
+      if (generation !== imageReadGeneration) return null;
+      if (isRemote) {
+        const upload = new File([blob], file.name.replace(/\.\w+$/, blob.type === 'image/png' ? '.png' : '.jpg'), { type: blob.type });
+        const response = await fileApi.upload(upload, 'image');
+        return { name: file.name, sizeBytes: blob.size, dataUrl: URL.createObjectURL(blob), uploadId: response.file.id };
       }
-      ui.images.push({ name: file.name, sizeBytes: file.size, dataUrl: reader.result });
-      ctx.refresh();
-    };
-    reader.onerror = () => {
-      if (!releaseReservation()) return;
-      toast(`${file.name}：图片读取失败，请重试。`, 'error');
-      ctx.refresh();
-    };
-    reader.onabort = () => {
-      if (!releaseReservation()) return;
-      ctx.refresh();
-    };
-    try {
-      reader.readAsDataURL(file);
-    } catch {
-      if (releaseReservation()) {
-        toast(`${file.name}：图片读取失败，请重试。`, 'error');
-        ctx.refresh();
+      const used = ui.images.reduce((sum, image) => sum + (Number(image.sizeBytes) || 0), 0);
+      if (used + blob.size > MAX_POST_IMAGE_BYTES) {
+        throw new Error(`演示版单帖图片压缩后合计不能超过 ${formatImageBytes(MAX_POST_IMAGE_BYTES)}`);
       }
+      return { name: file.name, sizeBytes: blob.size, dataUrl: await blobToDataUrl(blob) };
+    }).then((image) => {
+      if (!finish()) return;
+      if (image) ui.images.push(image);
+      ctx.refresh();
+    }).catch((error) => {
+      if (!finish()) return;
+      toast(`${file.name}：${error && error.message ? error.message : '图片处理失败'}`, 'error');
+      ctx.refresh();
+    });
+  });
+  ui.pendingImages = pendingImageCount;
+  ctx.refresh();
+}
+
+/** 真实 PDF：选中后立即上传，进度直接写进进度条，不整页重绘 */
+function parsePdfs(fileList) {
+  Array.from(fileList).forEach((file) => {
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      toast(`${file.name}：只支持 PDF 文件`, 'error');
       return;
     }
-    accepted.push(file.name);
+    if (file.size > MAX_PDF_BYTES) {
+      toast(`${file.name}：单个文件不能超过 20 MiB`, 'error');
+      return;
+    }
+    if (ui.files.length >= 3) {
+      toast('最多 3 个 PDF 附件', 'error');
+      return;
+    }
+    const entry = {
+      localId: `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: file.name, sizeBytes: file.size, status: 'uploading', progress: 0
+    };
+    ui.files.push(entry);
+    fileApi.upload(file, 'pdf', (ratio) => {
+      entry.progress = ratio;
+      const bar = viewEl.querySelector(`[data-upload-progress="${entry.localId}"]`);
+      if (bar) bar.style.width = `${Math.round(ratio * 100)}%`;
+    }).then((response) => {
+      if (!ui.files.includes(entry)) return;
+      Object.assign(entry, {
+        status: 'ready', uploadId: response.file.id, name: response.file.name,
+        sizeBytes: response.file.sizeBytes, pages: response.file.pages, previewCount: response.file.previewCount
+      });
+      ctx.refresh();
+    }).catch((error) => {
+      if (!ui.files.includes(entry)) return;
+      ui.files = ui.files.filter((item) => item !== entry);
+      toast(`${file.name}：${error && error.message ? error.message : '上传失败'}`, 'error');
+      ctx.refresh();
+    });
   });
-  return accepted;
+  ctx.refresh();
 }
 
 function discardPendingImages() {
   imageReadGeneration += 1;
-  for (const reader of pendingImageReaders) {
-    if (reader.readyState === FileReader.LOADING) reader.abort();
-  }
-  pendingImageReaders.clear();
-  pendingImageBytes = 0;
   pendingImageCount = 0;
+  ui.pendingImages = 0;
 }
 
 function formatImageBytes(bytes) {
@@ -1617,7 +2226,7 @@ function subscribeStore() {
   if (storeSubscribed) return;
   storeSubscribed = true;
   store.subscribe((state, meta) => {
-    render({ preserve: true });
+    refreshPreserving();
     if (meta && meta.saved && meta.saved.ok === false && meta.saved.code === 'quota' && !quotaWarned) {
       quotaWarned = true;
       toast('本机浏览器存储空间不足，最新改动可能没有保存', 'error');
@@ -1625,12 +2234,30 @@ function subscribeStore() {
   });
 }
 
+/* 同一对象的同一动作进行中时忽略连点：线上每次操作都要等服务端返回 */
+const actionsInFlight = new Set();
+
 delegate(document, 'click', '[data-action]', (event, el) => {
   if (el.tagName === 'A' && el.getAttribute('href') && !el.dataset.action) return;
   event.preventDefault();
+  const { dataset } = el;
+  const key = [dataset.action, dataset.post, dataset.attachment, dataset.circle, dataset.comment, dataset.user, dataset.notification, dataset.index]
+    .filter(Boolean).join(':');
+  if (actionsInFlight.has(key)) return;
+  actionsInFlight.add(key);
   Promise.resolve(handleAction(el.dataset.action, el)).catch((error) => {
     console.error('[click] handler failed', error);
     toast(`操作失败：${error && error.message ? error.message : '未知错误'}`, 'error');
+  }).finally(() => actionsInFlight.delete(key));
+});
+
+/* 下拉菜单（details）：点外面、选了菜单项或按 Esc 都收起 */
+const openMenus = () => document.querySelectorAll('details.account-menu[open], details.more-menu[open]');
+document.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  openMenus().forEach((menu) => {
+    const pickedItem = target && menu.contains(target) && target.closest('a, button');
+    if (!menu.contains(target) || pickedItem) menu.open = false;
   });
 });
 
@@ -1666,37 +2293,73 @@ delegate(document, 'click', '[data-close-backdrop]', (event, el) => {
 
 delegate(document, 'submit', 'form[data-form]', (event, form) => {
   event.preventDefault();
+  if (form.dataset.busy === '1') return;
+  const submit = form.querySelector('button[type="submit"]');
+  form.dataset.busy = '1';
+  if (submit) {
+    submit.disabled = true;
+    submit.classList.add('btn-pending');
+  }
   Promise.resolve(handleSubmit(form)).catch((error) => {
     console.error('[submit] handler failed', error);
     toast(`提交失败：${error && error.message ? error.message : '未知错误'}`, 'error');
+  }).finally(() => {
+    delete form.dataset.busy;
+    if (submit) {
+      submit.disabled = false;
+      submit.classList.remove('btn-pending');
+    }
   });
 });
 
 delegate(document, 'change', '[data-autosubmit]', (event, el) => {
   const form = el.closest('form');
-  if (!form) return;
-  // 资料里的学校包含课程；换学校后清掉不属于新学校的旧课程，避免无结果的组合。
-  if (form.dataset.form === 'filter' && el.name === 'school' && el.value) {
-    const course = form.elements.namedItem('courseId');
-    const selectedCourse = course && course.selectedOptions && course.selectedOptions[0];
-    if (course && course.value && selectedCourse?.dataset.school !== el.value) course.value = '';
-  }
-  Promise.resolve(handleSubmit(form)).catch(() => {});
+  if (form) Promise.resolve(handleSubmit(form)).catch(() => {});
+});
+
+delegate(document, 'change', 'input[type="file"][data-upload="pdf"]', (event, el) => {
+  const files = Array.from(el.files || []);
+  const form = el.closest('form');
+  el.value = '';
+  if (files.length) uploadPdfFiles(files, form).catch((error) => toast(`上传失败：${error.message}`, 'error'));
 });
 
 delegate(document, 'change', 'input[type="file"][data-upload="image"]', (event, el) => {
   if (el.files && el.files.length) parseImages(el.files);
   el.value = '';
 });
-
-delegate(document, 'input', '[data-count-for]', (event, el) => {
-  const target = viewEl.querySelector(`[data-counter="${el.dataset.countFor}"]`);
-  if (!target) return;
-  const max = Number(el.dataset.max || 0);
-  const length = el.value.trim().length;
-  target.textContent = max ? `${length} / ${max}` : `${length}`;
-  target.classList.toggle('over', max > 0 && length > max);
+delegate(document, 'change', 'input[type="file"][data-upload="pdf"]', (event, el) => {
+  if (el.files && el.files.length) parsePdfs(el.files);
+  el.value = '';
 });
+/* 挂圈后课程由圈决定，关联课程只在不挂圈时出现 */
+function syncComposeCourse() {
+  const form = viewEl.querySelector('form[data-form="post"]');
+  const field = form && form.querySelector('[data-course-field]');
+  const circle = form && form.elements.namedItem('circleId');
+  if (field && circle) field.hidden = !!circle.value;
+}
+delegate(document, 'change', 'form[data-form="post"] [name="circleId"]', syncComposeCourse);
+
+/* 发帖表单：实时预览、暂存内容、输入后清掉校验提示 */
+delegate(document, 'input', 'form[data-form="post"] textarea[name="body"]', (event, el) => {
+  const preview = viewEl.querySelector('[data-compose-preview]');
+  if (preview) preview.innerHTML = renderMarkdown(el.value);
+  const error = el.form.querySelector('[data-field-error="body"]');
+  if (error) error.hidden = true;
+  el.removeAttribute('aria-invalid');
+});
+const trackComposeDraft = (event, el) => {
+  if (el.name === 'circleId') syncComposeCourse();
+  if (!ctx.me) return;
+  ui.composeDraft = readComposeForm(el.form);
+  persistComposeDraft();
+};
+delegate(document, 'input', 'form[data-form="post"] [name="title"], form[data-form="post"] [name="body"], form[data-form="post"] [name="tags"]', trackComposeDraft);
+delegate(document, 'change', 'form[data-form="post"] [name="circleId"], form[data-form="post"] [name="courseId"]', trackComposeDraft);
+delegate(document, 'change', 'form[data-form="post"] input[name="confirmIndex"]', syncSourceConfirm);
+
+delegate(document, 'input', '[data-count-for]', (event, el) => updateCounter(el));
 
 delegate(document, 'change', 'input[name="qty"]', () => {
   const modal = overlayEl.querySelector('.modal');
@@ -1729,7 +2392,17 @@ document.addEventListener('error', (event) => {
   target.replaceWith(span);
 }, true);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && overlayEl.innerHTML) closeModal();
+  if (event.key === 'Escape') {
+    if (overlayEl.querySelector('.modal')) closeModal();
+    openMenus().forEach((menu) => { menu.open = false; });
+  }
+  // Ctrl/⌘ + Enter 发送：评论、私信和发帖都一样
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)
+    && event.target instanceof HTMLTextAreaElement && event.target.form
+    && ['comment', 'direct-message', 'post'].includes(event.target.form.dataset.form)) {
+    event.preventDefault();
+    event.target.form.requestSubmit();
+  }
 });
 
 window.addEventListener('hashchange', () => {
@@ -1737,17 +2410,20 @@ window.addEventListener('hashchange', () => {
 });
 
 async function boot() {
+  if (!isRemote && !isDemo) {
+    setHTML(viewEl, '<div class="card"><h1>运行模式未配置</h1><p>请维护者配置生产服务，或在独立本地环境显式使用 demo-static。</p></div>');
+    return;
+  }
   if (isRemote) {
     try {
       const payload = await api.getState();
       store.setState(payload.state);
-      if (payload.allowlistConfigured === false) {
-        toast('还没配置试用名单：请管理员编辑 server/allowlist.txt', 'error');
-      }
+      ensureCircleIndex();
+      if (!authAvailable()) toast('真实邮件服务尚未就绪，暂不能登录；游客仍可浏览公开资料。', 'error');
     } catch (error) {
       console.error('[boot] 无法连接后端', error);
       overlayEl.innerHTML = `<div class="modal-backdrop"><div class="modal">
-        <h2>连接不上试用服务器</h2>
+        <h2>暂时无法连接服务器</h2>
         <p class="small secondary mt-2">请确认后台服务已启动（窗口不要关），然后刷新页面。</p>
         <p class="tiny muted mt-2">${esc(error && error.message ? error.message : '')}</p>
         <div class="modal-actions"><button class="btn" type="button" onclick="location.reload()">刷新</button></div>

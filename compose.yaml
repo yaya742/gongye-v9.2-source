@@ -1,0 +1,68 @@
+# 共页 v10 · 单机部署（应用 + ClamAV + Caddy 自动 HTTPS）
+# 用法：复制 .env.example 为 .env 并填写，然后 docker compose up -d --build
+# 本机没有 Docker 时不要用本文件，改用 systemd 方案（见 DEPLOY_PRODUCTION.md）。
+name: gongye
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      # 对外正式地址；非 loopback 监听时服务端要求 https
+      PUBLIC_ORIGIN: https://${DOMAIN:?请先在 .env 中设置 DOMAIN}
+      HOST: 0.0.0.0
+      PORT: "8787"
+      DATA_FILE: /data/production.sqlite
+      ZJU_EMAIL_DOMAINS: ${ZJU_EMAIL_DOMAINS:-zju.edu.cn,st.zju.edu.cn}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+    volumes:
+      - app-data:/data
+    depends_on:
+      - clamav
+    networks:
+      - internal
+
+  # 病毒扫描：未就绪时上传会失败关闭，不会跳过扫描
+  clamav:
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - clamav-db:/var/lib/clamav
+    networks:
+      - internal
+
+  # 只暴露 80/443，自动申请并续期证书；同源转发 /api 与静态资源
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?请先在 .env 中设置 DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    networks:
+      - internal
+
+volumes:
+  app-data:
+  clamav-db:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:

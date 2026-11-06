@@ -28,7 +28,297 @@
 
 ---
 
-## [Unreleased]
+## [10.2.0] - 2026-11-06
+
+### Changed · 首屏瘦身（2026-11-06）
+- `/api/state` 不再全量下发 2375 个课程圈：只带“我的圈 + 有公开帖子的圈”；课程字段由 `id/school/name/code/category` 精简为 `id/school/name`。
+- 新增 `GET /api/circles/index`：全量圈索引 `[id, courseId, status]`，支持 gzip 与 ETag 304；前端首次拉取后缓存到 localStorage，用于补全本地圈列表。
+- 找课页与圈页在索引未到位时显示“正在加载课程圈…”，不再误报“还没有圈 / 圈不存在”。
+  - 文件：`server/view.mjs`、`server/production.mjs`、`server/pilot.mjs`、`src/api/client.js`、`src/main.js`、`src/pages/circles.js`、`tests/circles-index.test.mjs`
+  - 影响：新增公开只读接口；客户端多一次可缓存的索引请求；前端 `course.code/category` 变为 undefined（现有代码已做空值判断）。
+  - 验证：`node --test tests/*.test.mjs` 138 项 133 通过 0 失败 5 跳过；新增用例覆盖首屏裁剪、索引完整性与 304。实测生产首屏 615 KB → 125 KB（-80%），索引 88 KB、二次访问 304。
+  - 回滚：还原上述文件并删除新测试；索引接口可单独保留（不影响旧客户端）。
+
+### Added · CI（2026-11-06）
+- 新增 `.github/workflows/ci.yml`：push / PR 到 `main` 与 `release-*` 时执行 `npm ci`、`node scripts/check.mjs`、`node --test tests/*.test.mjs`（Node 22.13），失败时上传测试临时目录。
+  - 文件：`.github/workflows/ci.yml`
+  - 影响：只影响 CI，不改变运行时。
+  - 验证：工作流命令与本地一致（本地 138 项全绿）。
+  - 回滚：删除该文件。
+
+## [10.1.0] - 2026-11-06
+
+### Fixed · 演示模式"找资料"为空、资料详情提示原帖不可见（2026-11-06）
+- 演示帖子清理改为按需触发：`createSeed` 默认保留演示内容，只有显式 `{ keepDemoPosts: false }` 才清理（试用后端 `server/pilot.mjs` 与 `createProductionSeed` 传 `false`）。修复演示站 6 条资料挂着的原帖被清掉后，找资料列表为空、详情页显示"原帖当前不可见"的问题。
+  - 文件：`src/data/seed.js`、`server/pilot.mjs`、`server/database.mjs`
+  - 影响：演示模式（`demo-static`）重新初始化后可见演示帖子与资料；生产库仍只保留课程与圈，试用后端仍清演示内容。
+  - 验证：浏览器实测（清 localStorage 后，找资料列出 6 条资料、详情页可打开且下载按钮可用、无控制台错误）；`node --test tests/*.test.mjs` 137 项 132 通过 0 失败 5 跳过。
+  - 回滚：还原上述三个文件。
+
+### Added · 生产后端图片上传（2026-11-06）
+- 生产服务支持图片上传与公开读取：`POST /api/files` 接受 `image/jpeg`、`image/png`、`image/webp`，按文件头校验类型（拒绝 SVG/伪造类型），单张 ≤ 3 MiB；写入私有目录，配置 ClamAV 时同样过扫描（未配置则拒绝上传）。
+- 发帖 `images` 最多 9 项，只接受本人上传且未使用的 `uploadId`；路径由服务端生成为 `/api/files/<id>/image`，客户端不能提交任意 URL。
+- 图片随帖子公开：帖子已发布且作者可用时 `GET /api/files/:id/image` 无需登录；下架、封禁或删帖后立即 404。
+- 前端：手机照片先压到长边 1920 并去掉 EXIF，再上传并提交 `uploadId`；发布页图片区不再提示"暂未开放"。
+  - 文件：`server/files.mjs`、`server/production.mjs`、`server/view.mjs`、`src/main.js`、`src/pages/posts.js`
+  - 影响：新增路由 `/api/files/:id/image`；`uploads` 记录新增 `kind='image'`、`mime`；`filePolicy.images` 改为 `true` 并新增 `maxImages`、`maxImageBytes`；图片文件随数据目录一起备份。
+  - 验证：新增 `tests/images.test.mjs`（本人绑定、游客可读、他人图片被拒、伪造图片 415、下架后 404）；全量 `node --test tests/*.test.mjs` 137 项，132 通过 0 失败 5 跳过。
+  - 回滚：还原上述文件并删除 `tests/images.test.mjs`；已上传的图片文件可保留，旧代码不会读取。
+
+### Added · 整合 GitHub update-2026-11-04（界面 / 上传 / 圈治理 / 账号安全）（2026-11-06）
+- 把仓库 `yaya742/gongye-v9.2-source` 分支 `update-2026-11-04`（dd94240）的功能合并进 v10 生产线：以 v9.2（47d5f92）为基线做三方合并，冲突 18 个文件已逐个处理。
+  - 文件：`src/main.js`、`src/components/ui.js`、`src/components/layout.js`、`src/pages/{posts,account,circles,misc,resources}.js`、`src/state/{actions,selectors}.js`、`src/data/seed.js`、`src/api/client.js`、`server/{pilot,index,files}.mjs`、`tests/*.test.mjs`
+  - 影响：新增拉黑、私信举报、圈内置顶、建圈审批、圈内禁言（1/7/30 天或长期）、注销账号、导出个人数据、用户协议与隐私政策页（`#/terms`、`#/privacy`）、真实文件上传（PDF/图片，按 ID 鉴权）、手机照片压缩去 EXIF、每小时快照与全量 tar 备份、`TRUST_PROXY` 取真实 IP。`STORE_VERSION` 未变。
+  - 两套上传实现并存：生产走 `server/files.mjs`（v10，PDF + 扫描），试用后端走 `server/files-pilot.mjs`（原 GitHub 版，PDF/图片）；`server/pilot.mjs` 采用 GitHub 版（含备份、gzip、扫描），启动入口拆到 `server/pilot-entry.mjs`，`npm run pilot` 已同步。
+  - 生产约束保留：生产模式图片上传仍禁用（服务端只收 PDF）；发帖表单保留来源/授权与「文档来源」勾选、课程必选（不挂圈时）、学期与章节字段；下载只接受同源 `/api/files/<id>/download`；关于页保留「不是浙江大学官方」等合规声明。
+  - 验证：`node scripts/check.mjs` 通过（45 模块 / 25 路由 / 36 素材）；`node --test tests/*.test.mjs` 136 项，131 通过 0 失败 5 跳过（跳过为原有真实渲染与符号链接项）。
+  - 回滚：还原上述文件；`server/files.mjs`、`server/files-pilot.mjs`、`server/pilot-entry.mjs` 三个文件需一起还原，否则 `npm run pilot` 入口失效。
+- 测试适配（非业务改动）：演示帖子清理导致多数用例无内容可测，`boot`/`community`/`frontend-production` 的种子改为 `createSeed(now, { keepDemoPosts: true })`；`submitPost` 用例补 `pendingImageCount`、`filesUploading` 依赖；建圈申请用例改用语料外的「量子烹饪学」（v10 目录含 2375 门课，"数字电路"已存在）；禁用动作与云登录拒绝用例接受 401/403 两种拒绝码。
+  - 文件：`tests/boot.test.mjs`、`tests/community.test.mjs`、`tests/frontend-production.test.mjs`、`tests/logic.test.mjs`、`tests/production.test.mjs`
+  - 验证：同上 `node --test tests/*.test.mjs` 全绿。
+
+### Added · 部署与上线自检（2026-11-02）
+- 新增 `Dockerfile`、`.dockerignore`、`compose.yaml`（应用 + ClamAV + Caddy 自动 HTTPS）、`deploy/Caddyfile`、`deploy/gongye.service`（systemd 非 Docker 方案）与 `.env.example` 的 `DOMAIN` 变量。
+  - 应用容器以 uid 10001 非 root 运行，仅 `app-data` 卷可写；数据与病毒库分卷持久化。
+  - 验证：本机无 Docker，未做镜像构建验证；首次部署须按 `DEPLOY_PRODUCTION.md` 第 9 节执行。
+- 新增 `scripts/smoke-deploy.mjs`（`npm run smoke -- <URL>`）：只读检查首页/静态资源、`/api/health` 模式、`/api/state` 课程数与内部路径泄露、7 个敏感路径 404、跨站 POST 403、公网强制 https。
+  - 验证：对本机生产实例运行，16 项 PASS、1 项 WARN（SMTP 未配置 → `authReady=false`），退出码 2 符合“通过但有需人工确认项”的定义。
+
+### Changed
+- `.gitignore` 排除 `server/allowlist.txt` 和 `server/pilot.config.json`：前者含真实邮箱，后者含管理员邮箱和云服务配置；仓库是公开的，避免误提交。示例文件 `server/allowlist.example.txt` 照常保留。
+  - 文件：`.gitignore`
+  - 影响：这两个文件不会再出现在 `git status` 里，部署时仍按原方式放在服务器上。
+  - 验证：`git check-ignore server/allowlist.txt server/pilot.config.json`
+  - 回滚：删除这两行。
+
+### Added
+- 拉黑：在个人主页或私信里拉黑，在账号设置里管理名单。拉黑后双方不能互发私信，被拉黑的人做的事（回复、送页签）不再提醒拉黑方，双方互相取消关注；对方的公开内容仍然可见。
+  - 文件：`src/state/actions.js`（`setBlock`）、`src/state/selectors.js`、`server/pilot.mjs`、`src/pages/account.js`、`src/main.js`
+  - 影响：新增 `blocks` 数据，只返回给本人。旧数据缺这个字段按空处理，没有升 `STORE_VERSION`。
+  - 验证：业务测试与后端测试各新增一项，端到端测试验证服务端拒发。
+  - 回滚：还原上述文件。
+- 私信举报：私信对话里可以“举报对方”，会附上对方发给举报人的最近 10 条私信。管理员只能删除这些私信（同时提醒发送人）或不处理；需要封号时到“用户”页签操作。
+  - 文件：`src/state/actions.js`、`src/state/selectors.js`、`src/main.js`、`src/pages/account.js`、`src/pages/misc.js`
+  - 影响：举报新增 `dm` 类型和 `evidence` 字段；私信新增 `status`，被删除的私信对双方显示为“这条私信已被删除”。
+  - 验证：新增业务测试；端到端测试验证管理员能看到证据并删除。
+  - 回滚：还原上述文件。
+- 圈内成员管理：管理员可以在后台“圈子 → 成员”或帖子菜单里，对单个圈的成员禁言（1、7、30 天或长期，到期自动恢复）、解除禁言、移出、允许重新加入。理由必填，会通知对方并写入审计。
+  - 文件：`src/state/actions.js`（`setMemberRestriction`）、`src/state/selectors.js`、`server/pilot.mjs`、`src/pages/misc.js`、`src/pages/posts.js`、`src/main.js`
+  - 影响：成员关系新增 `restrictedUntil`；成员名单只返回给管理员；禁言判断改为使用调用方传入的时间。
+  - 验证：新增业务测试；端到端测试验证被禁言的人在圈里发帖被拒、圈外照常。
+  - 回滚：还原上述文件。
+- 注销账号与导出个人数据：账号设置新增“账号与数据”。注销时，个人资料、私信、通知、关注、收藏和页签流水都会删除，发布过的内容可以选择保留（显示为“已注销用户”）或全部永久移除；所有设备上的会话立即失效，未发布的上传文件同时删除。导出会下载本人全部数据的 JSON。
+  - 文件：`src/state/actions.js`（`deleteAccount`）、`src/state/selectors.js`（`personalData`）、`server/pilot.mjs`（`/api/me/export`）、`src/pages/account.js`、`src/main.js`
+  - 影响：用户新增状态 `deleted`；已注销账号的主页显示“这个账号已注销”；管理员账号不能自助注销。登录流程没有改动。
+  - 验证：业务测试新增 3 项，后端测试新增 2 项；端到端验证注销后刷新仍为未登录、同一邮箱重新注册是新账号。
+  - 回滚：还原上述文件；已注销的账号无法恢复。
+- 病毒扫描：设置 `CLAMD_HOST`/`CLAMD_PORT` 或 `CLAMD_SOCKET` 后，每个上传文件都要经 ClamAV 扫描。有毒拒绝（422）；扫描服务不可用时同样拒绝（503）。后台“平台概况”和 `/api/health` 显示扫描是否开启。
+  - 文件：`server/scanner.mjs`（新增）、`server/files.mjs`、`server/pilot.mjs`、`server/index.mjs`、`src/pages/misc.js`
+  - 影响：开启后，扫描服务故障期间无法上传；不开启时行为不变。
+  - 验证：后端测试用模拟的 clamd（按 INSTREAM 协议，遇到 EICAR 测试串报毒）验证三种情况；端到端验证界面提示和后台状态。没有对真实 ClamAV 实测。
+  - 回滚：不设环境变量即可关闭；或还原上述文件。
+- 用户协议与隐私政策：新增 `#/terms`、`#/privacy` 页面和全站页脚。条款按代码的实际行为编写（收集哪些信息、IP 只在内存中用于限流、快照保留 48 小时、注销与导出方式等）。运营方名称、联系邮箱、生效日期和服务器所在地可配置，没填时标为“待补充”。
+  - 文件：`src/pages/legal.js`（新增）、`src/pages/index.js`、`src/router.js`、`src/components/layout.js`、`src/main.js`、`index.html`、`src/config.js`（新增 `legal` 配置项，`mode` 未改）、`server/pilot.mjs`、`server/index.mjs`、`assets/css/app.css`
+  - 影响：注册时勾选同意协议需要改登录页，按要求暂缓。文本需要运营方核对，并请法务或学校相关部门审阅。
+  - 验证：渲染测试覆盖两个新页面；浏览器验证页脚链接和待补充标记。
+  - 回滚：还原上述文件并删除 `src/pages/legal.js`。
+
+### Verified
+- 2026-11-04 补齐账号与安全功能。`node scripts/check.mjs` 通过；`npm test` 78/78。演示模式新增 20 项交互用例通过；隔离的试用后端端到端新增 17 项通过（拉黑、私信举报、圈内禁言、病毒扫描、导出、注销）。登录页没有改动；未部署。
+
+### Fixed
+- 较旧的浏览器上传照片会全部失败，提示“图片无法读取”。原因是压缩时 `createImageBitmap` 传了较新的 `imageOrientation: 'from-image'` 参数，旧浏览器直接报错，而代码没有退回。现在报错时改用 `<img>` 解码。
+  - 文件：`src/main.js`
+  - 影响：只改图片解码方式；压缩尺寸、质量和去 EXIF 都不变。
+  - 验证：模拟 `createImageBitmap` 报错后能正常添加照片；正常浏览器的 6 项图片用例照常通过。
+  - 回滚：还原上述文件。
+- 手机上的管理后台表格四列挤在一起，邮箱压住状态标签、说明压住“处理”按钮。现在手机上每条记录改为上下堆叠，桌面版举报原因可以换行。举报状态原来直接显示内部英文值（如 `dismissed`），改为中文。
+  - 文件：`src/pages/misc.js`、`assets/css/app.css`
+  - 影响：只改展示。
+  - 验证：举报、圈子、内容、用户、操作记录五个页签在 390 / 1440 宽度下逐行检测，单元格内容无重叠。
+  - 回滚：还原上述文件。
+
+### Added
+- 试用后端支持真实文件上传：`POST /api/files?kind=pdf|image`，按文件内容校验类型（PDF 拒绝含脚本或启动动作的文件；图片只收 JPEG / PNG / WebP，不收 SVG）。限额为单个 PDF 20 MiB、单张图片 3 MiB、每账号 300 MiB、每小时 40 次。文件私有存放，按随机 ID 鉴权下载：PDF 需登录，图片随帖子公开，预览随资料公开；删帖后链接立即失效、文件同时删除，选了没发布的文件 24 小时后清理。装有 poppler-utils 时自动统计页数并生成前两页预览。
+  - 文件：`server/files.mjs`（新增）、`server/pilot.mjs`、`server/index.mjs`、`src/api/client.js`、`src/lib/format.js`、`src/components/ui.js`、`src/pages/posts.js`、`src/pages/resources.js`、`src/state/actions.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：接口新增 `/api/files`；服务端数据新增 `uploads` 记录，不进公开状态。发帖只能引用自己上传、还没用过的文件，名称和大小以服务端为准；客户端 `path` 白名单没有放宽。静态演示版仍只能选示例 PDF。没有病毒扫描。
+  - 验证：`tests/pilot.test.mjs` 新增 5 项；试用后端端到端 22/22（上传 → 预览 → 发布 → 下载内容一致 → 游客权限）。
+  - 回滚：还原上述文件并删除 `server/files.mjs`；数据目录下的 `files/` 可以保留或删除，旧代码不会读取。
+- 手机照片先在浏览器压缩：长边缩到 1920、重新编码为 JPEG，同时去掉拍摄位置等 EXIF 信息；小的 PNG 截图保持原样。取消原来“单帖合计 512 KiB”的限制，试用后端逐张上传；演示版仍按压缩后合计 800 KiB 存在本机。
+  - 文件：`src/main.js`、`src/pages/posts.js`
+  - 影响：图片不再以 data URL 塞进帖子数据，整站状态不随图片膨胀。
+  - 验证：4000×3000、带 GPS 字段的照片上传后为长边 ≤ 1920、不到 1 MB，文件中找不到 EXIF 和 GPS 字样。
+  - 回滚：还原上述文件。
+- 管理员可以置顶或取消置顶圈内帖子（帖子“更多”菜单）；可以在后台通过或驳回建圈申请，驳回必须写理由，结果会通知申请人。通过目录外课程的申请时，会把课程加进目录并开圈。
+  - 文件：`src/state/actions.js`（`setCirclePin`、`resolveApplication`）、`server/pilot.mjs`、`src/pages/posts.js`、`src/pages/misc.js`、`src/main.js`
+  - 影响：新增两个管理员动作并写入审计。
+  - 验证：`tests/logic.test.mjs` 新增 3 项；端到端验证申请通过与置顶。
+  - 回滚：还原上述文件。
+- 运维：每小时在数据目录 `backups/` 留一份快照（保留 48 份）；`/api/admin/export?full=1` 导出包含上传文件的 `.tar` 全量备份；状态和动作接口支持 gzip。
+  - 文件：`server/pilot.mjs`、`server/files.mjs`、`PILOT.md`
+  - 影响：重新部署前要用全量备份，只导出 JSON 会丢文件。
+  - 验证：`tests/pilot.test.mjs` 校验 tar 内含文件且按块对齐、gzip 响应可解析、非管理员不能导出。
+  - 回滚：还原上述文件。
+
+### Fixed
+- 在圈里点“静音”会把自己禁言：发帖和评论都被拒，提示“你在这个圈被禁言”。现在静音只关提醒，禁言只看 `writeRestricted`。
+  - 文件：`src/state/selectors.js`、`tests/logic.test.mjs`
+  - 影响：已经静音的成员恢复发言权限；聚合流仍然不显示静音的圈。
+  - 验证：新增“静音只关提醒”测试；原禁言测试改为用 `writeRestricted`。
+  - 回滚：还原上述文件。
+- 通知设置不生效：关掉“回复”“页签”通知后仍会收到。现在 `notifyUser` 会按设置过滤；采纳、退款和系统通知始终发送，设置页的系统通知改为不可取消的勾选；`updatePrefs` 只保存这两个开关。
+  - 文件：`src/state/actions.js`、`src/pages/account.js`、`src/main.js`
+  - 影响：关闭后不再生成对应通知。
+  - 验证：新增“通知设置”测试。
+  - 回滚：还原上述文件。
+- 建圈申请走不通：只能选目录里已有、还没有圈的课程，管理员也没有处理入口，申请会一直待审。现在可以写目录外的课程名，重复申请幂等，已有圈的课程直接提示去加入。
+  - 文件：`src/state/actions.js`、`src/pages/circles.js`、`src/main.js`
+  - 影响：申请记录新增 `courseName`，`courseId` 可以为空；原来按 `courseId` 申请照常可用。
+  - 验证：新增申请通过与驳回两项测试。
+  - 回滚：还原上述文件。
+- 不挂圈的帖子选不了课程，课程页也看不到它们。发帖页增加“关联课程”（挂圈时由圈决定，自动隐藏）；服务端拒绝不存在的课程。
+  - 文件：`src/pages/posts.js`、`src/state/actions.js`、`src/main.js`
+  - 影响：`createPost` 对不存在的 `courseId` 返回 `bad_course`。
+  - 验证：新增“发帖课程”测试。
+  - 回滚：还原上述文件。
+- 网关后面所有人共用一个限流额度：服务端按连接 IP 限流，代理后面 IP 都一样。现在登录用户按账号限流；设 `TRUST_PROXY=1` 时，未登录请求按真实 IP 限流。浏览事件失败不再弹错误提示。
+  - 文件：`server/pilot.mjs`、`server/index.mjs`、`src/main.js`、`src/pages/resources.js`、`src/pages/circles.js`
+  - 影响：只改限流分桶；登录流程没有改动。
+  - 验证：`tests/pilot.test.mjs` 通过。
+  - 回滚：还原上述文件。
+
+### Changed
+- 管理后台：建圈申请移到圈子页签最前，页签上显示待处理数；手机上隐藏和圈名重复的课程列；试用版不再显示“重置演示数据”。帖子右上角，作者的编辑、删除和管理员的置顶收进“更多”，手机上“举报”只显示图标。
+  - 文件：`src/pages/misc.js`、`src/pages/posts.js`、`assets/css/app.css`
+  - 影响：只改展示。
+  - 验证：1440 / 390 截图核对。
+  - 回滚：还原上述文件。
+
+### Tests
+- `createSeed(now, { keepDemoPosts: true })` 让测试保留演示帖子，默认行为不变。补齐过时的测试：试用后端在安全收紧后需要配置跨域来源、未登录请求在动作前返回 401；“今日页签榜”改用固定日期，不再跨日失败；分页测试自带足够的圈。
+  - 文件：`src/data/seed.js`、`tests/logic.test.mjs`、`tests/render.test.mjs`、`tests/boot.test.mjs`、`tests/pilot.test.mjs`
+  - 验证：`npm test` 69/69（此前默认状态 36/58）。
+
+### Docs
+- `PILOT.md` 写明上传规则、备份与迁移步骤、`TRUST_PROXY`，以及还没有病毒扫描；`README.md`、`IMPLEMENTATION_STATUS.md` 同步现状，`AGENTS.md` 更新测试数量。
+
+### Verified
+- 2026-11-03 功能修复与真实上传。未改登录页、登录流程和 `src/config.js`；未部署。
+  - `node scripts/check.mjs` 通过；`npm test` 69/69，整条命令退出码为 0。
+  - 恢复演示内容的临时副本上，`qa.mjs` 通过、`qa-flow.mjs` 15/15；隔离的试用后端上，`qa-pilot.mjs` 8/8。
+  - 试用后端端到端 22/22：真实 PDF 上传、生成预览、发布、下载内容一致；照片压缩并去掉 EXIF；游客权限；建圈申请通过；置顶。
+  - 交互用例 82 项通过（含旧浏览器照片解码与后台表格叠压检测）；1440 / 1024 / 820 / 390 / 360 宽度下全部页面无溢出、无控制台错误。
+  - 只在 Chromium 无头模式验证；没有在真机和托管平台（含云邮箱登录）上验证。
+
+### Fixed
+- 修复帖子“评论”入口打不开：列表卡片跳到“这篇内容不存在或已移除”，详情页跳到“这个页面不存在”。原因是 `#comments` 锚点被 hash 路由当成新路径。列表卡片改用 `?focus=comments`，详情页改用 `goto-comments` 动作，打开后定位到讨论区。
+  - 文件：`src/components/ui.js`、`src/pages/posts.js`、`src/main.js`
+  - 影响：只改跳转方式，不改评论权限与数据。
+  - 验证：列表卡片、详情页按钮在 1440 / 390 宽度下实测讨论区顶部都落在 84px。
+  - 回滚：还原上述文件。
+- 修复发帖“预览”无效：按钮会变成“关闭预览”，但模板没有输出预览内容。现在预览与正文并排显示（手机上下排列），随输入实时更新。
+  - 文件：`src/pages/posts.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：预览仍使用先转义的 `renderMarkdown`，不放开原始 HTML。
+  - 验证：输入 `**粗体**` 后预览显示 `<strong>`，继续输入同步更新，开关预览不丢正文。
+  - 回滚：还原上述文件。
+- 修复“加载更多”会替换列表：点击后帖子从 10 条变成 2 条。现在在原列表后追加，滚动位置不变，也不重播入场动画。
+  - 文件：`src/pages/circles.js`、`src/main.js`
+  - 影响：`offset` 改为表示多展开的条数，刷新和返回能回到同样长度。
+  - 验证：`#/circles?mode=discover` 从 10 条变 12 条，加载完按钮消失。
+  - 回滚：还原上述文件。
+- 修复字数计数器：输入时显示成“12 / 20000 / 20000”，页面重绘后归零。
+  - 文件：`src/main.js`
+  - 影响：仅展示。
+  - 验证：输入 12 字显示“12 / 20000”，打开预览后保持。
+  - 回滚：还原上述文件。
+- 修复账号菜单点页面其他位置、按 Esc 都关不掉；手机顶栏除首页外没有搜索入口。
+  - 文件：`src/main.js`、`src/components/layout.js`、`assets/css/app.css`
+  - 影响：手机顶栏增加搜索图标、隐藏与底栏重复的铃铛；消息入口仍在底栏。
+  - 验证：菜单点外部与 Esc 均收起；手机点搜索图标进入搜索页并聚焦输入框。
+  - 回滚：还原上述文件。
+- 修复若干入口行为：“看看这个课友圈 / 看看这个圈”点击后会直接加入，改为只打开圈页；游客在找课页点加入，登录后跳到无效地址，改为回到找课页；游客下载和收藏资料后回到资料页而不是原帖；申请补充课程跳到找课页时自动展开建圈申请。
+  - 文件：`src/main.js`、`src/pages/resources.js`、`src/pages/posts.js`、`src/pages/circles.js`
+  - 影响：加入课友圈回到“明确确认才加入”，与现有规则一致；不改登录页和登录流程。
+  - 验证：游客下载、游客加入的跳转地址实测通过。
+  - 回滚：还原上述文件。
+
+### Changed
+- 找资料：首页改为搜索区 + 资料列表 + 右侧最新讨论，“看全部讨论”改到课友圈发现页；资料列表去掉只有一条提示的右栏，手机上筛选默认收起并显示已选条件，可逐个取消；只有一所学校时隐藏学校筛选；搜索关键词时保留已选筛选。
+  - 文件：`src/pages/resources.js`、`assets/css/app.css`
+  - 影响：只调整布局与入口；检索规则、索引条件不变。
+  - 验证：手机列表页高度由 1869px 降到 1348px，筛选后首条结果在首屏；条件取消、搜索保留筛选实测通过。
+  - 回滚：还原上述文件。
+- 资料详情：标题下直接放下载、收藏、分享和讨论入口（此前本页不能收藏）；适用范围与未覆盖并排；预览可点击放大，手机改为左右滑动；移除重复的课程、学期信息和详情页右栏的每日页签。
+  - 文件：`src/pages/resources.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：下载条件不变，仍只要求登录且邮箱已验证；收藏沿用原帖的收藏动作。
+  - 验证：手机详情页高度由 4455px 降到 3427px；收藏、分享实测通过。
+  - 回滚：还原上述文件。
+- 课友圈：游客默认进入“发现”，不再落到“登录后查看”的空页；左栏只留我的圈和找课，去掉与页签、板块重复的入口；手机上板块改为横向滑动，隐藏与底栏重复的发帖入口，可领取页签时显示一行领取入口。
+  - 文件：`src/pages/circles.js`、`assets/css/app.css`
+  - 影响：只调整默认视图和入口；公开范围、发帖和入圈规则不变。
+  - 验证：游客打开 `#/circles` 直接看到帖子；1440 / 1024 / 820 / 390 / 360 无溢出。
+  - 回滚：还原上述文件。
+- 圈页：静音、移到往期、退出收进“更多”菜单；置顶帖不再在列表里重复；手机用面包屑替代被截断的导航胶囊；页头增加课程页入口。
+  - 文件：`src/pages/circles.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：只调整入口位置；退出仍需确认。
+  - 验证：静音生效、退出弹确认、置顶帖不重复实测通过。
+  - 回滚：还原上述文件。
+- 找课：表单合并为一个搜索框，只有多所学校时才显示学校选项；结果改为双列卡片；建圈申请只列还没有圈的课程，规则说明收到页面底部。
+  - 文件：`src/pages/circles.js`、`assets/css/app.css`
+  - 影响：`courseId` 参数继续有效，改为可取消的已选条件；建圈规则不变。
+  - 验证：加入后留在本页并更新状态，按课程名搜索实测通过。
+  - 回滚：还原上述文件。
+- 发布：发帖和分享资料共用顶部切换；发帖改为两列起始字段、自定义图片按钮和缩略图，PDF 附件与收录到找资料默认折叠；分享资料按资料信息、文件、说明分区，申请补充课程移到课程字段下方。纯文字帖不再显示文档来源确认，带图片、附件或收录时才出现。空正文就地提示并聚焦。
+  - 文件：`src/pages/posts.js`、`src/pages/resources.js`、`src/components/ui.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：字段和校验规则不变。`createPost` 本来只在带图片、附件或资料时要求确认，界面现在与规则一致。
+  - 验证：纯文字帖无需勾选即可发布；带 PDF 未确认被拦下；`qa-flow.mjs` 发布帖子与资料均通过。
+  - 回滚：还原上述文件。
+- 发帖内容暂存：标题、正文、标签、发布位置和板块自动存在本机 `localStorage['gongye-compose-draft']`，离开再回来可恢复，发布、清空或退出登录时删除。
+  - 文件：`src/main.js`、`src/pages/posts.js`
+  - 影响：新增一个本机键，只属于当前账号，不上传服务端，不改业务数据结构。
+  - 验证：离开再回来内容恢复；发布后键被删除；清空草稿生效。
+  - 回滚：还原上述文件；旧键可忽略。
+- 帖子：列表卡片去掉重复的 `#课程圈` 和课程标签、无实际功能的“…”按钮，信息流附件不再显示版本和更新说明；手机上四个操作固定一行；详情页作者的编辑、删除收进“更多”菜单，帖子详情右栏移除每日页签。
+  - 文件：`src/components/ui.js`、`src/pages/posts.js`、`assets/css/app.css`
+  - 影响：只调整展示；赞、收藏、赠签规则不变，删除仍需确认。
+  - 验证：手机 8 条帖子的操作条全部一行；删除弹确认实测通过。
+  - 回滚：还原上述文件。
+- 课程页改为课程主页：页头给出资料数、讨论数、成员数和主操作，资料与讨论用页签切换，空的精选和归档区块不再显示。全站搜索去掉与页签重复的类型下拉。消息页把两层页签改为页签 + 筛选标签，“标为已读”改为文字操作，打开相关帖子时自动标为已读。
+  - 文件：`src/pages/misc.js`、`src/pages/account.js`、`src/main.js`、`assets/css/app.css`
+  - 影响：只调整布局；`markNotificationRead` 规则不变。
+  - 验证：课程页切换、打开通知后标为已读实测通过；手机课程页高度由 2014px 降到 1253px。
+  - 回滚：还原上述文件。
+- 搜索页没输入关键词时不再列出全站帖子，改为课程入口和发现页入口；页签规则收进折叠区，放到收支记录之后，手机表格日期不再折行；设置页简介框缩小；成长页去掉版本说明和图标名写错造成的空白。
+  - 文件：`src/pages/misc.js`、`src/pages/account.js`、`src/pages/growth.js`、`assets/css/app.css`
+  - 影响：只调整展示；页签与成长规则不变。
+  - 验证：手机页面截图人工核对。
+  - 回滚：还原上述文件。
+- 防重复提交：表单提交中禁用提交按钮，同一对象的动作进行中忽略连点；评论、私信和发帖支持 Ctrl/⌘ + Enter 发送。
+  - 文件：`src/main.js`、`assets/css/app.css`
+  - 影响：线上网络慢时不会重复发布；不改接口。
+  - 验证：连续提交两次只产生一条评论；Ctrl + Enter 发表评论通过。
+  - 回滚：还原上述文件。
+- 清理界面上的版本号和开发说明，例如“9.2 起……”“静态演示版没有 PDF 渲染服务”“页面显示的余额来自服务端结果”“复用原帖，不复制附件”；站点描述不再提教学班。
+  - 文件：`src/pages/resources.js`、`src/pages/circles.js`、`src/pages/misc.js`、`src/pages/account.js`、`src/main.js`、`index.html`
+  - 影响：只改文案。
+  - 验证：页面截图人工核对。
+  - 回滚：还原上述文件。
+
+### Tests
+- 更新过时的浏览器验收脚本：`qa-flow.mjs` 发布资料时补选必填课程；`qa.mjs` 按当前页面更新必含文案，邀请码改为 `GY-CALC`。
+  - 文件：`scripts/qa.mjs`、`scripts/qa-flow.mjs`
+  - 验证：见下方 Verified。
+
+### Verified
+- 2026-11-03 v9.3 界面整理。未改登录页、登录流程、`src/config.js`、`server/`、业务动作与数据结构；未部署。
+  - `node scripts/check.mjs` 通过。
+  - `npm test` 在仓库默认状态下仍有 22 项失败（36/58），失败项与改动前完全相同：演示帖子被清理后，多数测试没有内容可测。
+  - 在临时副本恢复演示内容后，改动前后结果相同，53/58 通过。失败的 5 项是 `9.1 渲染…分页`（目录缩减后不足以分页）和 4 项试用后端测试，均与本次改动无关，未修复。`今日页签榜` 依赖当天日期，曾在改动前后同时失败，换日后同时通过。
+  - 同一临时副本上 `qa.mjs` 通过（无控制台异常、无页面错误、无横向溢出），`qa-flow.mjs` 15/15。
+  - 在隔离的临时副本上用虚构账号跑 `qa-pilot.mjs`，试用后端模式 8/8 通过（只监听本机）。
+  - 另用临时脚本跑 71 项交互用例通过（含真实图片文件上传）；另有 2 条用例不适用于当时的条件（手机规则跑在桌面宽度、定位用例选了滚不动的短帖），对应的手机宽度和长帖用例已通过。
+  - 1440 / 1024 / 820 / 390 / 360 五个宽度无溢出、无控制台错误。
+  - 只在 Chromium 无头模式验证，未在真机、Safari 或微信内置浏览器上验证。
 
 ### Removed
 - 按分享要求移除院校相关标识：删除外部院校课程名目录与对应生成脚本（两个文件均已从包内移除），课程与课程圈回到 6 门演示课程；演示课程的学校名改为「示例大学」，课程代码留空。
@@ -43,100 +333,34 @@
   - 回滚：恢复上述文件，并在 `cloudAuth.js` 里加回固定域名正则。
 - 文档中与院校相关的表述一并改为中性说法（部署、验收、交接、试用说明）。
 
-### Changed
-- 课友圈游客说明不再常驻显示，改为板块筛选行末尾的问号按钮；点击后弹窗说明游客可浏览、登录并验证邮箱后可参与的范围。
-  - 文件：`src/pages/circles.js`、`src/main.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只改提示入口，不改变公开浏览、登录、验证邮箱或发帖权限。
-  - 验证方式：`node scripts/check.mjs` 与改动 JavaScript 文件语法检查；未安排浏览器验收。
-  - 回滚：还原上述文件即可恢复课友圈常驻提示。
-- 增加站内私信：个人主页提供私信入口；消息页可列出对话、发送文本、查看未读与已读状态；服务端消息状态每 12 秒刷新，并限制为对话双方可读取。未验证邮箱的账号不能发送，试用后端按账号限制每分钟最多 30 条。
-  - 文件：`src/pages/account.js`、`src/main.js`、`src/components/layout.js`、`src/state/actions.js`、`src/state/store.js`、`src/data/seed.js`、`server/pilot.mjs`、`assets/css/app.css`、`IMPLEMENTATION_STATUS.md`、`CHANGELOG.md`
-  - 影响：本地演示仓库升至版本 11；私信数据加入 `directMessages`。静态演示版仅保存在本机浏览器，不会送达其他设备；跨账号互发需启用共享服务端。试用后端只向当前登录用户返回其参与的对话，并对发送频率限流。未修改 `src/config.js` 的模式，试用后端仍非生产系统。
-  - 验证方式：`node scripts/check.mjs` 与改动 JavaScript 文件语法检查；未安排浏览器验收。
-  - 回滚：还原上述文件；回退前备份本地演示数据，旧版前端不会读取版本 11 的 localStorage 状态。服务端 JSON 数据请先保留 `directMessages` 字段。
-- 精简发帖表单首屏：移除常驻的公开范围长说明与重复的板块提示，改由标题旁问号弹窗查看发布规则；板块按钮缩小并去掉重复图标，压缩标题、正文、图片、PDF 和标签说明。
-  - 文件：`src/pages/posts.js`、`src/main.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只调整说明入口、表单文案与按钮密度；发布字段、公开范围、附件限制和校验规则不变。
-  - 验证方式：`node scripts/check.mjs` 与改动 JavaScript 文件语法检查；未安排浏览器验收。
-  - 回滚：还原上述文件即可恢复原发帖表单布局与提示文案。
+### Fixed · 集成验收修复（2026-11-02）
+- PDF 渲染改为一次性子进程（`server/file-processing.mjs`）：原生画布在 worker 线程里偶发访问违例（0xC0000005）会拖垮整个服务进程；隔离后崩溃或超时只让本次上传返回 503，也避免损坏文件把原生依赖加载进服务进程。
+  - 影响：预览改为「本机 fork 子进程 + IPC」，限制不变（20 MiB、500 页、30 秒、前两页 PNG）。
+  - 验证：`RUN_PDF_INTEGRATION=1 node --test tests/files-render.test.mjs`，上传链路测试连续 5 次全绿。
+- 未发布附件的匿名预览统一返回 404（原 401），避免用状态码区分「上传中」和「不存在」。
+- 补上 `/api/files` 上传端点路由（原先只匹配 `/api/files/` 前缀，真实上传会 404）。
+- 生产发帖缺少 `courseId`/`term` 时按预期返回 `bad_course`/`bad_term`，测试示例同步补齐。
+- 课程圈没有邀请码时不再渲染 `#/invite/undefined` 与「邀请课友」按钮。
+- 旧固定码入口 `启动试用.cmd`、跨域 `启动跨域后端.cmd`、`清空数据.cmd` 改为拒绝执行并指向 `DEPLOY_PRODUCTION.md`，避免误删生产数据或用固定码对外服务。
 
-### Verified
-- `node scripts/check.mjs` 通过：33 个模块、23 条路由和本地资源引用可解析；8 个改动的 JavaScript 文件语法检查通过。
-- 本次发帖表单改动后再次运行 `node scripts/check.mjs` 通过；`src/pages/posts.js` 与 `src/main.js` 语法检查通过。
-- 未运行 `npm test`，未执行浏览器验收。
-  - 回滚：还原上述文件即可恢复原发帖表单布局与提示文案。
+### Security · v10 生产化修复
+- 默认入口切换为服务端随机邮箱验证码、精确域名白名单、HttpOnly Cookie 与 SQLite WAL 共享持久化；拒绝仅凭 email 的 cloudSignIn、固定码和客户端伪造会话。
+  - 文件：`server/index.mjs`、生产服务/会话/存储/最小化视图模块、`src/api/client.js`
+  - 影响：真实账号不复用演示用户；SMTP 缺失不发码，不回落演示。单实例部署，不代表全校容量已压测。
+  - 验证：HTTP 安全回归测试（身份伪造、静态内部路径、数据隔离、停用会话、CSRF）。
+- 接入可信 PDF 上传、ClamAV 扫描、PDF 结构校验与前两页 PNG，发布只接收本人 uploadId；每次下载重查授权，下架关闭旧链接。
+  - 文件：`server/files.mjs`、发布/详情 UI 与文件集成测试
+  - 验证：伪造路径、跨用户上传、扫描失败、私有下载和下架反例；真实扫描服务仍需部署联调。
+- 拆分通知静音与管理员发言限制，编辑也复核圈权限，停用账号吊销会话；服务端只提供本人私有关系及公开聚合计数。
+  - 文件：`src/state/actions.js`、`selectors.js`、`tests/community.test.mjs`
+  - 验证：个人设置、退出重入不能解除管理限制；聚合计数无需暴露成员/收藏清单。
+  - 回滚：停止服务，恢复成套数据库/私有文件备份与对应代码；禁止回滚成固定验证码公开服务。
 
-- 移除静态演示模式全站顶部的“演示模式”提示条；内部试用模式的提示保留。
-  - 文件：`src/components/layout.js`、`CHANGELOG.md`
-  - 影响：仅隐藏静态演示模式的全站横幅，不改演示数据、登录提示或页面内的操作说明；内部试用的公开范围提醒不变。
-  - 验证：本地与公开测试站检查顶部横幅不再显示；`node scripts/check.mjs` 通过。
-  - 回滚：还原上述文件即可恢复静态演示横幅。
-- 修正账号设置头像提示：将与实际选项不符的“6 款几何头像 / 需真实存储服务”改为“可选 8 款内置头像，随时可更换”。头像静态文件随 `assets/` 目录部署。
-  - 文件：`src/pages/account.js`、`CHANGELOG.md`
-  - 影响：只更新头像说明文案；头像选择与保存逻辑不变。重新部署时继续上传完整 `assets/` 目录即可，不需单独处理头像文件。
-  - 验证：本地账号设置页核对 8 个头像选项与提示文案；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原提示文案。
-- 精简个人主页等级说明：移除侧栏的长段落与重复等级门槛，在个人等级行右侧加入问号按钮；点击后按 `GROWTH_RULES` 展示等级门槛和经验来源详情。
-  - 文件：`src/pages/account.js`、`src/main.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只调整说明入口与展示方式，不改等级规则、经验数据或权限。
-  - 验证：本地浏览器核对个人主页已移除侧栏说明，问号按钮可打开详情并显示五级门槛、四类经验来源；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原侧栏说明与等级弹窗内容。
-- 继续精简资料与课友圈空态：没有活动筛选时隐藏清除入口，空结果明确区分“未找到资料”和“暂无资料”；课友圈游客说明改为单行提示，并移除重复品牌句。
-  - 文件：`src/pages/resources.js`、`src/pages/circles.js`、`src/components/layout.js`、`src/main.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只调整空态文案与入口展示，不改搜索条件、发布权限或公开范围；登录页保留专门公告，默认全站提示条不再重复出现，自定义公告仍显示。
-  - 验证：本地浏览器核对无筛选资料页隐藏清除操作、空态文案准确；课友圈发现页保留页签、板块筛选和单行登录提示；全站搜索页只显示一组搜索框，登录页不重复显示默认提示条。未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原空态文案、清除链接和提示卡片。
-- 精简课友圈窄屏导航：在主内容已有“发现/关注/我的圈”页签与板块筛选时，侧栏折叠导航只保留“找课 / 加入圈子”，避免收藏、消息和板块入口重复铺成大按钮。
-  - 文件：`src/pages/circles.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只改变窄屏侧栏导航展示；桌面侧栏、主内容页签、板块筛选和找课功能不变。
-  - 验证：核对窄屏媒体规则与主内容页签，确认仅保留找课入口；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原横向入口列表。
-- 登录前公告：将账号与隐私说明移到登录 / 注册表单上方，按本机演示、内部试用、校园邮箱内测显示对应提醒；移除表单里重复的阅读确认行，账号设置页不再重复展示。
-  - 文件：`src/pages/account.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只调整登录前说明文案与位置，不改登录校验或数据保存规则。
-  - 验证：本地演示页核对公告出现在邮箱输入框之前，相关存储与公开范围提示不再在表单后重复出现；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原登录提示布局。
-- 精简账号设置页：移除“账号与隐私”标题和三段说明；退出登录与重置演示数据按钮改为独立紧凑操作行。
-  - 文件：`src/pages/account.js`、`CHANGELOG.md`
-  - 影响：只删去设置页说明文案，不改变账号数据、隐私规则或按钮行为。
-  - 验证：本地预览核对设置页不再显示这些说明，退出登录和重置按钮仍在；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复说明文案。
-- 收纳低频个人入口：顶部头像改为“我的”菜单，集中主页、收藏、页签、成长和账号设置；个人主页移除重复的常用入口卡片，只保留与当前页面直接相关的资料编辑操作。
-  - 文件：`src/components/layout.js`、`src/pages/account.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：只调整个人功能入口和窄屏顶栏排布，不改变账号、通知或页签数据；消息仍保留顶部直达入口。
-  - 验证：本地预览检查登录用户菜单打开、主页/收藏/页签/成长/设置链接、个人主页布局及窄屏导航单行显示；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复头像直达主页和原常用入口卡片。
-- 精简首页重复入口：资料首页只保留站内资料搜索、确有可用资料的课程快捷项和最近资料；全站搜索改在其他页面显示。结果页把学期、类型、标签收进“更多筛选”。找课默认只列有成员或讨论的圈，按课程搜索仍可查看空圈；建圈与公开规则收起，列表卡片移除邀请链接。访客页签卡片改为明确的登录入口，不再显示破折号余额。
-  - 文件：`src/components/layout.js`、`src/pages/resources.js`、`src/pages/circles.js`、`src/components/bookmark.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：首页与找课页面展示层级和默认列表变化；不改课程、圈子或帖子数据。未登录仍可浏览公开内容。
-  - 验证：本地预览核对首页、资料筛选和找课页；首页只保留资料搜索，未活跃圈默认隐藏，课程搜索仍能找到空圈，低频筛选默认收起且已选时展开。未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原来的入口、列表和侧栏。
-- 资料筛选选项按其余已选条件联动：学校、课程、学期、类型和标签只列出当前组合下有可用资料的值；更换学校时自动清除不属于该校的课程。下架或不符合索引条件的资料不会再贡献学期和标签选项。
-  - 文件：`src/state/selectors.js`、`src/pages/resources.js`、`src/main.js`、`CHANGELOG.md`
-  - 影响：仅筛选选项和组合行为变化，不改资料数据或接口；条件仍按交集过滤。
-  - 验证：本地 `/#/resources` 页面核对；当前没有可用资料时，各筛选只显示“全部”选项，旧样例的课程、学期、类型和标签不再残留。未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原先固定筛选选项。
-
-### Verified
-- 2026-11-01 创建并发布“共页测试预览”静态站，随后按用户要求将访问范围从私有改为公开；任何持链接的人都可访问。部署包只含 `dist/` 网站文件，不含 `server/`、`server/data/`、文档和测试目录。页面保持 `demo-static`，互动数据保存在每位访问者的浏览器。
-  - 文件：`sites/gongye-static-demo-20261101/.openai/hosting.json`、`sites/gongye-static-demo-20261101/dist/`、`CHANGELOG.md`
-  - 影响：测试站公开可访问；不改原有服务器或线上数据。站点仍是本机演示模式，不提供跨访客数据同步。
-  - 验证：`node scripts/check.mjs` 通过；Sites 部署状态为 succeeded，公开权限更新成功；未登录浏览器可直接打开首页。自动化测试分项 58 项中 36 项通过、22 项失败。
-  - 回滚：将访问范围恢复为私有；本地项目文件不受影响。
-
-### Fixed
-- 修复资料筛选卡在平板和窄屏布局中被当作横向导航栏压窄的问题；卡片改为占满内容宽度，筛选文字与控件保持在卡片内。
-  - 文件：`src/pages/resources.js`、`assets/css/app.css`、`CHANGELOG.md`
-  - 影响：仅响应式布局，不改筛选逻辑或数据。
-  - 验证：本地预览在窄屏宽度下检查筛选卡片；未运行自动化测试。
-  - 回滚：还原上述文件即可恢复原布局。
-
-### Removed
-- 将已确认的 16 条源码演示帖子加入精确清理清单；仅 ID、标题、正文标记同时匹配时，调用应用现有永久移除规则。新建种子、本地旧演示数据升级和旧 JSON 后端首次启动都会处理匹配项；附件停止提供、资料退出索引、有效赠签按原规则退款，其他帖子保留。服务端启动前逐字节备份旧数据，并在日志报告备份路径。
-  - 文件：`src/data/demo-post-cleanup.js`、`src/data/seed.js`、`src/state/store.js`、`server/pilot.mjs`、`PILOT.md`、`server/MIGRATE_PILOT_DATA.md`、`SOURCE_HANDOFF.md`、`CHANGELOG.md`
-  - 影响：`STORE_VERSION` 9 → 10、`seedVersion` 7 → 8；本地旧演示数据会迁移匹配样例。JSON 试用后端仅首次启动迁移一次，生成 `*.pre-demo-post-cleanup-v1-*.bak`；ID 或文案不匹配的帖子跳过。外部云数据库不受此启动迁移影响。
-  - 验证：静态核对 16 个 ID、标题和正文标记及 `removePost` 副作用；未运行自动化测试或迁移，未改写线上数据。
-  - 回滚：停止 JSON 后端后，按启动日志路径将备份恢复到 `DATA_FILE`；本地浏览器数据需用迁移前保存的 localStorage 备份恢复，单独回退代码不会恢复已移除帖子。
+### Changed · v10 学生贡献与治理
+- 保留全校目录、一门课一个圈；有内容课程优先，帖子支持学期与章节、圈内按学期筛选；资料需标明原创/已授权/公开许可及来源。
+- 新增建圈申请审核、非官方说明、隐私/版权/学术诚信与申诉信息；已有资料迁入仅提供只读清单预检，不绕过扫描和人工授权。
+  - 文件：`src/pages/circles.js`、`misc.js`、`src/components/layout.js`、`scripts/import-resources.mjs`、部署交接文档。
+  - 验证与未完成外部联调以 `DELIVERY_STATUS.md` 为准；不沿用历史浏览器截图结论。
 
 ### Docs
 - 新增 `SOURCE_HANDOFF.md`：给接手维护者的源码交接说明（目录职责、运行/测试命令、9.2 关键规则、数据位置、改码与发版流程、部署清单、已知限制）。
@@ -147,32 +371,6 @@
   - 验证：解压后 `node scripts/check.mjs` 与 `npm test` 通过；清单 SHA-256 与文件一致
   - 影响：无代码/数据变化，仅交付物
   - 回滚：删除该目录与 ZIP 即可，不影响线上
-
-### Security
-- 试用后端状态改为字段白名单；API 动作使用显式允许列表；云端登录令牌由服务端向云端身份接口复核；静态路由拒绝读取 `server/` 与站点目录外的文件。空跨域配置默认仅同源，跨域需精确配置 `ALLOWED_ORIGINS`，`*` 不生效；试用后端只接受并下载内置演示 PDF 路径。
-  - 文件：`server/pilot.mjs`、`server/index.mjs`、`src/api/cloudAuth.js`、`src/main.js`、`PILOT.md`
-  - 影响：公开状态和登录接口的返回/验证规则收紧；跨域部署需配置完整来源；当前试用后端仍不支持真实 PDF 上传。
-  - 验证：代码静态审阅；未运行自动化测试或验证命令，未访问或修改线上数据。
-  - 回滚：恢复上述服务端和客户端代码；若未来迁移数据库，按对应备份单独恢复。此次未迁移或改写线上数据。
-
-### Fixed
-- 停止新种子展示“暂不公开”的固定导数草稿；本地旧演示存储版本 8/9 会按课程合并重复圈、重映射帖子及成员关系并保留旧邀请码。前一阶段先把固定草稿转为 draft；本次新增的 `STORE_VERSION = 10` 样例清理会对匹配的固定帖子执行永久移除。另有只对显式导出 JSON 副本运行的迁移工具，默认 dry-run，`--apply` 前备份并做无损性检查。
-  - 文件：`src/data/seed.js`、`src/data/demo-v3.js`、`src/state/store.js`、`src/state/actions.js`、`src/pages/circles.js`、`server/migrate-pilot-data.mjs`、`server/MIGRATE_PILOT_DATA.md`、`SOURCE_HANDOFF.md`
-  - 影响：本地旧存储版本升级到 `STORE_VERSION = 9`；服务端迁移脚本只处理维护者提供的导出副本，保留原记录但不会迁移 PDF 文件。部署前须核实真实附件存储兼容性。
-  - 验证：静态审阅迁移与保留检查；未运行自动化测试，也未运行迁移脚本或改写数据库。
-  - 回滚：本地存储从迁移前备份恢复；副本迁移可用脚本生成的时间戳备份恢复。线上数据此次未触碰。
-
-### Changed
-- 登录、发布、课友圈和管理员页面明确区分演示/试用模式，说明已发布内容的公开范围及登录并不提供保密；发布页显示每帖图片总量限制、演示附件能力和管理员入口条件。
-  - 文件：`src/components/layout.js`、`src/pages/account.js`、`src/pages/posts.js`、`src/pages/circles.js`、`src/pages/misc.js`、`src/main.js`、`README.md`、`DEPLOY_HANDOFF.md`、`PILOT.md`
-  - 影响：生产模式每帖图片原文件合计上限为 512 KiB，演示模式为 800 KiB，最多 9 张；当前没有真实 PDF 上传服务。
-  - 验证：登录后只读查看线上找资料、课友圈、个人页、发帖页和帖子详情；对源码与文案做静态审阅。没有提交表单、发帖或改账号。
-  - 回滚：恢复上述文件；本轮未部署，线上界面与数据没有因此改变。
-
-### Verified
-- 2026-10-31 对 `gongye.app.workbuddy.host` 做只读检查：健康接口报告 15 个账号、22 篇帖子和 1 个允许域名；资料页显示 6 份资料；找课页显示 6 个圈，其中微积分Ⅰ重复出现 3 次（含归档圈），概率论与大学物理Ⅱ暂无圈。登录后的发帖页同时出现“发布后公开可见”和顶部“内容内测同学可见”；一条自述暂不公开的导数草稿详情显示为可下载，需优先由站点维护者核实状态。
-  - 文件：无（线上只读观察）
-  - 验证：浏览器页面和 `/api/health` 只读查看；未导出账号明细、未读取白名单内容、未写入线上数据。
 
 ---
 
@@ -215,7 +413,7 @@
 
 ## [9.1.0] - 2026-10-29
 
-主题：接入第九版美术包「每日一页」102 张逐日插画 + 18 张新页页表情；落地 9.1 的课程 Tag 必填、课程优先搜索、手机卡片密度与卡片配色层级；导入课程名称目录并建立 2026秋冬 待补充课友圈。
+主题：接入第九版美术包「每日一页」102 张逐日插画 + 18 张新页页表情；落地 9.1 的课程 Tag 必填、课程优先搜索、手机卡片密度与卡片配色层级；导入浙大 2026-2027 秋冬课程并建立 2026秋冬 待补充课友圈。
 
 ### Added
 - 每日页签接入 102 天逐日插画：`assets/daily/webp/*.webp`（106 个文件，含 4 张 `-neutral` 文化替代）；`src/data/daily-bookmarks.js` 每条新增 `illustration_id/path/png_path/scene/variant/neutral_illustration_path`，`src/components/bookmark.js` 优先读 `illustration_path`，失败再退回母题。
@@ -224,8 +422,8 @@
 - 页页表情第二、三弹共 18 个：`assets/stickers/vol2|vol3/{webp,thumb}`；`src/data/stickers.js` 改为 3 个弹次、22 个稳定 ID，弹层按弹次分组、单列滚动（`max-height:min(58vh,420px)`）。
   - 文件：`src/data/stickers.js`、`src/components/ui.js`、`assets/css/app.css`、`assets/stickers/`
   - 验证：逻辑测试断言 22 个 ID 唯一、v1/v2/v3 均在白名单；`check.mjs` 通过
-- 新增课程目录数据文件（2371 门课程名）与生成脚本；`seed.js` 为每门课派生一个「2026秋冬 · 教学班待补充」课友圈（邀请码按课程派生），同名演示课程复用。
-  - 文件：`src/data/seed.js`、`src/lib/format.js`（`TERMS` 增加 `2026秋冬`）
+- 新增 `src/data/zju-courses-2026aw.js`（2371 门浙大 2026-2027 秋冬课程名）与生成脚本 `scripts/build-zju-catalog.mjs`；`seed.js` 为每门课派生一个「2026秋冬 · 教学班待补充」课友圈（id `zjc_*`，邀请码 `ZJ-*`），同名演示课程复用。
+  - 文件：`scripts/build-zju-catalog.mjs`、`src/data/zju-courses-2026aw.js`、`src/data/seed.js`、`src/lib/format.js`（`TERMS` 增加 `2026秋冬`）
   - 说明：与演示课程同名的（数据结构、概率论与数理统计）复用课程记录，但仍各补一个 2026秋冬 圈；共 2371 个「教学班待补充」圈
   - 影响：`STORE_VERSION` 6 → 7，旧本地演示数据会在首次打开时重建；线上真实数据不受影响（部署包不含后端）
   - 回滚：还原上述文件并把 `STORE_VERSION` 改回 6
@@ -238,13 +436,13 @@
 - 资料卡结构改为课程 Tag 优先：`.res-course-tag`（背景 `#F3DDC8`、文字 `#713E29`、边框 `#D7AA87`、600 字重、44px 触达区）→ 类型 Tag → 标题 → 摘要 → 元信息 + 操作；缺课程时显示「课程待补充」。
 - 手机（≤600px）卡片：内边距 14、间距 12、标题 16/22 两行、摘要 14/20 两行、次要信息一行；不设固定高度、不裁切。
 - `searchResources` 返回 `{items,total,courseOnly,mode,course}`：显式 `courseId` 为硬筛选；查询中的课程名/别名解析为课程 + 剩余意图；别名同名校过多时优先已有资料的课程，仍多门则给候选不合并；排序按分数，`courseOnly` 永不混入主结果。
-- `resolveCourseQuery` 增加最长课程名优先、同名课程按资料量收敛、别名精确匹配优先等规则，避免课程目录里的同名课程把搜索全部判为歧义。
+- `resolveCourseQuery` 增加最长课程名优先、同名课程按资料量收敛、别名精确匹配优先等规则，避免浙大目录里的同名课程把搜索全部判为歧义。
 
 ### Fixed
 - 页签插画加载失败时不再把整张卡降级为无图：仅移除插画区域（`data-bookmark-art`），文字与署名保留。
 
 ### Tests
-- `tests/logic.test.mjs` 新增 8 项：课程优先搜索分组、硬筛选、同名歧义候选、发布缺课程/不存在课程被拒、草稿不入索引、旧资料可搜且作者可补选、逐日插画与文化替代、22 个表情、课程目录与 2026秋冬 圈数量。
+- `tests/logic.test.mjs` 新增 8 项：课程优先搜索分组、硬筛选、同名歧义候选、发布缺课程/不存在课程被拒、草稿不入索引、旧资料可搜且作者可补选、逐日插画与文化替代、22 个表情、浙大课程与 2026秋冬 圈数量。
 - 合计 `node tests/logic.test.mjs` 39 项通过；`render/boot/pilot` 分别为 5/3/11 项通过（`npm test` 共 58 项）。
 
 ### Docs
@@ -253,7 +451,7 @@
 ### Verified
 - `node scripts/check.mjs`：素材 36+、模块 32、路由 23 全部可解析。
 - `npm test`：logic 39/39、render 5/5、boot 3/3、pilot 11/11，共 58 项通过。
-- 静态服务冒烟：`/`、`/src/main.js`、`/assets/daily/webp/2026-10-27.webp`、`/assets/stickers/vol3/webp/yeye-hungry.webp` 均 200，WebP MIME 正确。
+- 静态服务冒烟：`/`、`/src/main.js`、`/src/data/zju-courses-2026aw.js`、`/assets/daily/webp/2026-10-27.webp`、`/assets/stickers/vol3/webp/yeye-hungry.webp` 均 200，WebP MIME 正确。
 - 发布包：`release/gongye-v9.1/`（310 个文件、16.66 MB）与 `release/gongye-v9.1-static.zip`（313 项、16.7 MB），均含 106 张逐日插画。
 - 浏览器视觉验收（360/390/430 + 桌面）未在沙箱内执行，见 `V9_ACCEPTANCE.md` 待办。
 
@@ -331,7 +529,7 @@
 
 ### Verified
 - `npm test` 47/47；`qa` 30 张；`qa-flow` 15/15。
-- 浏览器：榜单为 4 / 2 / 1 枚的三篇帖子；学校下拉展开 32 个选项，选择「示例大学」后 URL 带上 `school`，菜单收起。
+- 浏览器：榜单为 4 / 2 / 1 枚的三篇帖子；学校下拉展开 32 个选项，选择「浙江大学」后 URL 带上 `school`，菜单收起。
 
 ### Rollback
 还原 `bookmarkBoard`、榜单组件与 `enhanceFilterSelects`，并删除 `.fsel*` 样式；`STORE_VERSION` 改回 5。

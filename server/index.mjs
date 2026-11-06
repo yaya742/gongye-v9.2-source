@@ -1,105 +1,41 @@
 #!/usr/bin/env node
-/* 共页 · 内部试用版启动入口
- *
- *   node server/index.mjs
- *   PORT=8787 HOST=0.0.0.0 node server/index.mjs
- *
- * 环境变量：
- *   PORT            端口，默认 8787
- *   HOST            监听地址，默认 127.0.0.1；同事要访问就设 0.0.0.0
- *   ADMIN_EMAIL     管理员邮箱（该邮箱注册后自动成为管理员）
- *   ALLOWED_EMAILS  逗号分隔的邮箱白名单（也可以写 server/allowlist.txt）
- *   ALLOWED_DOMAINS 逗号分隔的域名白名单，例如 company.com
- *   ALLOWED_ORIGINS 允许跨域访问的完整来源（逗号分隔）；默认仅同源
- *   DATA_FILE       数据文件路径，默认 server/data/db.json
- *   COOKIE_SECURE   1 表示 Cookie 只走 HTTPS（本机 http 试用请保持 0）
+/* Production entry only. PUBLIC_ORIGIN must be HTTPS outside loopback.
+ * SMTP_HOST/PORT/SECURE/USER/PASS/MAIL_FROM enable real email OTP.
+ * ZJU_EMAIL_DOMAINS and ADMIN_EMAILS are exact allowlists; DATA_FILE is SQLite.
+ * Explicit local-only legacy demo entry: node server/pilot.mjs (never npm start).
  */
 
-import os from 'node:os';
-import path from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { createPilotServer } from './pilot.mjs';
+import { createProductionServer } from './production.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(HERE, '..');
-
-const PORT = Number(process.env.PORT || 8787);
-// 托管平台会注入 PORT 并要求绑定 0.0.0.0；本机手动启动时仍默认只听 127.0.0.1
-const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
-const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || '').trim();
-
-const allowlistPath = path.join(HERE, 'allowlist.txt');
-const dataFile = process.env.DATA_FILE || path.join(HERE, 'data', 'db.json');
-
-/* 部署时随包带的运行配置（仓库里没有这个文件，由打包脚本写进发布目录）。
- * 内容示例：
- *   { "requireCloudAuth": true,
- *     "adminEmails": ["admin@example.com"],
- *     "cloud": { "endpoint": "https://xxx.app.workbuddy.host", "publishableKey": "wbpk_..." } }
- */
-const configPath = path.join(HERE, 'pilot.config.json');
-let fileConfig = {};
-if (existsSync(configPath)) {
-  try {
-    fileConfig = JSON.parse(readFileSync(configPath, 'utf8')) || {};
-  } catch (error) {
-    console.error('[pilot] pilot.config.json 解析失败，按默认配置启动', error.message);
-  }
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major < 22 || major === 22 && minor < 13) throw new Error('共页生产服务需要 Node.js >=22.13');
+process.env.NODE_ENV = 'production';
+const port = Number(process.env.PORT || 8787);
+const host = process.env.HOST || '127.0.0.1';
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT 必须是有效端口');
+let service;
+try {
+  service = await createProductionServer();
+  const address = await service.listen(port, host);
+  console.log('共页 · 单实例生产服务已启动（SQLite WAL；请勿多进程共享此数据目录）');
+  console.log(`访问来源：${process.env.PUBLIC_ORIGIN || `http://${host}:${address.port}`}`);
+  console.log(`登录方式：email-otp；域名白名单：${service.emailDomains.join('、')}（需核实实际校内邮箱域名）`);
+  if (!service.authReady) console.warn(`邮箱登录不可用：${service.configurationIssue}；requestCode 将返回 503，不会使用固定码。`);
+  if (!process.env.SUPPORT_EMAIL) console.warn('正式上线前请配置 SUPPORT_EMAIL 以接收版权/隐私投诉。');
+  if (!process.env.ADMIN_EMAILS && !process.env.ADMIN_EMAIL) console.warn('尚未配置 ADMIN_EMAILS：没有管理员账号。');
+  console.log('上传需配置可信扫描器和 PDF 预览；缺失时失败关闭。HTTPS 反向代理必须同源并限制上传请求大小。');
+} catch (error) {
+  await service?.close();
+  console.error('生产服务启动失败。请检查 Node 版本、PUBLIC_ORIGIN、SQLite 数据完整性和运行配置；不会自动重建数据库。');
+  process.exitCode = 1;
 }
-
-const pilot = await createPilotServer({
-  dataFile,
-  allowlistFile: allowlistPath,
-  adminEmail: ADMIN_EMAIL || fileConfig.adminEmail || '',
-  adminEmails: Array.isArray(fileConfig.adminEmails) ? fileConfig.adminEmails : [],
-  requireCloudAuth: fileConfig.requireCloudAuth === true,
-  cloud: fileConfig.cloud && fileConfig.cloud.endpoint ? fileConfig.cloud : null
-});
-
-const address = await pilot.listen(PORT, HOST);
-const allowCount = pilot.allowlist.emails.size;
-const domainCount = pilot.allowlist.domains.size;
-
-console.log('==============================================');
-console.log('  共页 v2.2 · 内部试用版已启动');
-console.log('==============================================');
-console.log(`  本机访问：http://127.0.0.1:${address.port}/`);
-if (HOST === '0.0.0.0') {
-  const nets = os.networkInterfaces();
-  const ips = Object.values(nets)
-    .flat()
-    .filter((info) => info && info.family === 'IPv4' && !info.internal)
-    .map((info) => info.address);
-  if (ips.length) {
-    console.log('  同事访问（同一局域网）：');
-    ips.forEach((ip) => console.log(`    http://${ip}:${address.port}/`));
-  }
-} else {
-  console.log('  提示：只监听本机。要让同事访问，请用 HOST=0.0.0.0 启动。');
+if (service && process.exitCode !== 1) {
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    await service.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
 }
-console.log('');
-console.log(`  数据文件：${dataFile}`);
-console.log(`  试用名单：${allowCount} 个邮箱 + ${domainCount} 个域名`);
-if (allowCount + domainCount === 0) {
-  console.log('  ⚠ 还没有配置名单：编辑 server/allowlist.txt 加入同事邮箱后重启服务');
-}
-console.log(`  登录方式：${pilot.loginMode === 'cloud' ? '云服务邮箱验证码（固定码已关闭）' : '固定验证码 123456'}`);
-if (ADMIN_EMAIL) console.log(`  管理员邮箱：${ADMIN_EMAIL}`);
-else if (Array.isArray(fileConfig.adminEmails) && fileConfig.adminEmails.length) {
-  console.log(`  管理员邮箱：${fileConfig.adminEmails.join(', ')}`);
-} else console.log('  提示：用 ADMIN_EMAIL=你的邮箱 启动，可让该账号成为管理员');
-if (pilot.corsPolicy.allowedOrigins.length) {
-  console.log(`  跨域来源：仅同源 + ${pilot.corsPolicy.allowedOrigins.join(', ')}`);
-} else {
-  console.log('  跨域来源：仅同源；跨域静态站需配置 ALLOWED_ORIGINS 精确来源');
-}
-if (pilot.corsPolicy.wildcardIgnored) {
-  console.log('  ⚠ ALLOWED_ORIGINS 中的 * 不生效；请填写具体来源（协议、域名和端口）');
-}
-console.log('  反向代理须覆盖 X-Forwarded-Proto / X-Forwarded-Host 为外部请求的协议和主机');
-console.log('  跨域部署时：静态站的 src/config.js 填 mode=production + apiBase=本服务的 https 地址');
-if (!existsSync(allowlistPath)) console.log(`  ⚠ 找不到 ${allowlistPath}`);
-console.log('');
-console.log('  按 Ctrl+C 停止服务；数据随时可删（server/data 目录）。');
-console.log('==============================================');

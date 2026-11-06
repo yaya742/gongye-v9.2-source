@@ -6,8 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSeed } from '../src/data/seed.js';
+import { ZJU_COURSES } from '../src/data/zju-courses-2026aw.js';
 import * as A from '../src/state/actions.js';
-import { levelOf } from '../src/lib/format.js';
+import { levelOf, shanghaiDate } from '../src/lib/format.js';
 import * as S from '../src/state/selectors.js';
 import { createStore } from '../src/state/store.js';
 import { bookmarkOfDay } from '../src/data/quotes.js';
@@ -19,7 +20,7 @@ const NOW = Date.UTC(2026, 9, 26, 4, 0, 0);
 const NEXT_DAY = NOW + 24 * 3600 * 1000;
 
 function fresh() {
-  return createSeed(NOW);
+  return createSeed(NOW, { keepDemoPosts: true });
 }
 
 function login(db, email = 'student@example.com') {
@@ -40,7 +41,7 @@ function resourceInput(overrides = {}) {
   return {
     title: '数列极限的三种做法整理',
     courseId: 'c_calc',
-    school: '示例大学',
+    school: '浙江大学',
     term: '2026秋',
     type: '笔记',
     coverage: '数列极限、夹逼、单调有界',
@@ -183,12 +184,13 @@ test('评论权限：普通圈帖需成员，公开资料帖允许非成员纠�
   assert.equal(S.isActiveMember(db, me.id, 'ci_calc_a'), false, '评论不自动入圈');
 
   const member = S.membership(db, 'u_qinghe', 'ci_calc_a');
-  member.muted = true;
+  member.moderationMuted = true;
+  member.writeRestricted = true;
   const mutedComment = A.addComment(db, { postId: 'p_calc_notes', body: '被禁言的人不能借资料入口绕过限制。' }, NOW);
   assert.equal(mutedComment.ok, true, '其他用户不受影响');
   db.session = { userId: 'u_qinghe' };
   const muted = A.addComment(db, { postId: 'p_calc_notes', body: '被禁言的人不能借资料入口绕过限制。' }, NOW);
-  assert.equal(muted.code, 'muted');
+  assert.equal(muted.code, 'restricted');
 
   db.session = { userId: 'u_admin' };
   assert.ok(A.archiveCircle(db, { circleId: 'ci_calc_a', reason: '测试归档' }, NOW).ok);
@@ -471,7 +473,7 @@ test('管理员：新建课友圈、封禁账号与帖子', () => {
   db.session = { userId: 'u_admin' };
 
   // 新建课友圈：一门课只能有一个圈
-  db.courses.push({ id: 'c_test_new', school: '示例大学', name: '测试课程', code: null, category: '测试' });
+  db.courses.push({ id: 'c_test_new', school: '浙江大学', name: '测试课程', code: null, category: '测试' });
   const created = A.createCircle(db, { courseId: 'c_test_new' }, NOW);
   assert.ok(created.ok, created.message);
   const circle = S.circleOf(db, created.data.circleId);
@@ -769,8 +771,9 @@ test('每日页签：创立纪念、周年与普通日期', () => {
 });
 
 test('今日页签榜：按帖子今天收到的页签数排序', () => {
-  const db = createSeed();
-  const rows = S.bookmarkBoard(db);
+  // 固定在上海正午：种子里的赠签按“今天”排布，过了午夜用 Date.now() 会跨天失败
+  const db = fresh();
+  const rows = S.bookmarkBoard(db, { date: shanghaiDate(new Date(NOW)) });
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.map((row) => row.count), [4, 2, 1]);
   assert.ok(rows.every((row) => row.post && row.post.title));
@@ -937,13 +940,14 @@ test('9.2 课程圈：一门课一个圈，不再有教学班、教师与学期�
   assert.ok(db.circles.every((circle) => circle.status === 'active'));
   assert.equal(new Set(db.circles.map((circle) => circle.inviteCode)).size, db.circles.length, '邀请码唯一');
 
-  assert.equal(realCourses.length, 6, '演示课程 6 门');
-  assert.ok(db.circles.every((circle) => db.courses.some((course) => course.id === circle.courseId)),
-    '每个圈都指向已存在的课程');
-  assert.equal(db.courses.filter((course) => course.school === '示例大学').length, 6, '示例大学课程 6 门');
-  assert.ok(db.courses.every((course) => ['示例大学', '通用·不限学校'].includes(course.school)), '学校只有演示项');
-  const shared = db.courses.find((course) => course.name === '数据结构');
-  assert.ok(shared, '演示课程仍在目录里');
+  const catalogNames = new Set(ZJU_COURSES.map((course) => course.name));
+  assert.equal(db.courses.filter((course) => catalogNames.has(course.name)).length, 2371, '2371 个课程名都有对应课程');
+  const byName = (name) => db.courses.find((course) => course.name === name);
+  const target = byName(ZJU_COURSES[0].name);
+  assert.ok(target, '浙大课程应在目录里');
+  assert.ok(db.circles.some((circle) => circle.courseId === target.id), '浙大课程也有圈');
+  const shared = byName('数据结构');
+  assert.ok(shared, '同名演示课程与浙大课程复用一条课程记录');
   assert.equal(db.circles.filter((circle) => circle.courseId === shared.id).length, 1, '同名课程只有一个圈');
   assert.equal(S.circleLabel(db, db.circles[0]).endsWith('课友圈'), true);
 });
@@ -969,4 +973,258 @@ test('9.1 素材：106 张逐日插画与 18 个新表情文件齐全', async ()
     assert.ok(existsSync(resolve(appDir, sticker.file)), `缺少表情文件 ${sticker.id}`);
     assert.ok(existsSync(resolve(appDir, sticker.thumb)), `缺少缩略图 ${sticker.id}`);
   }
+});
+
+test('静音只关提醒：本人仍能在圈里发帖和评论', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  const circleId = 'ci_calc_a';
+  assert.ok(A.setCircleFlag(db, { circleId, flag: 'muted', value: true }).ok);
+
+  const post = A.createPost(db, { board: 'help', circleId, body: '静音之后我还是想问一个问题，应该能发出去。' }, NOW);
+  assert.ok(post.ok, post.message);
+  const comment = A.addComment(db, { postId: post.data.postId, body: '静音的人也能继续评论。' }, NOW);
+  assert.ok(comment.ok, comment.message);
+
+  const feed = S.feedPosts(db, { meId: 'u_qinghe', mode: 'my', limit: 50 }, NOW);
+  assert.ok(!feed.items.some((item) => item.circleId === circleId), '静音的圈不进聚合流');
+});
+
+test('通知设置：关闭后不再收到对应通知，系统通知不能关', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.updatePrefs(db, { patch: { replies: false, gifts: false, system: false, junk: 'x' } }).ok);
+  assert.deepEqual(db.prefs.u_qinghe, { replies: false, gifts: false }, '只保存可关闭的两项');
+
+  const post = A.createPost(db, { board: 'method', body: '测试通知设置是否真正生效的一篇帖子，长度足够。' }, NOW);
+  assert.ok(post.ok, post.message);
+  const before = db.notifications.filter((n) => n.userId === 'u_qinghe').length;
+
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.addComment(db, { postId: post.data.postId, body: '这条回复不应该提醒作者。' }, NOW).ok);
+  assert.ok(A.claimDaily(db, {}, NOW).ok);
+  assert.ok(A.sendGift(db, { postId: post.data.postId, qty: 1, idemKey: 'prefs-1' }, NOW).ok);
+  assert.equal(db.notifications.filter((n) => n.userId === 'u_qinghe').length, before, '回复和页签都不再通知');
+
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.updatePrefs(db, { patch: { replies: true } }).ok);
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.addComment(db, { postId: post.data.postId, body: '打开后这条回复应该提醒作者。' }, NOW).ok);
+  assert.equal(db.notifications.filter((n) => n.userId === 'u_qinghe').length, before + 1, '重新打开后恢复通知');
+});
+
+test('发帖课程：不挂圈可以关联课程，课程必须存在', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  const good = A.createPost(db, { board: 'notes', courseId: 'c_la', body: '这是一篇不挂圈但属于线性代数的笔记分享。' }, NOW);
+  assert.ok(good.ok, good.message);
+  assert.equal(S.postOf(db, good.data.postId).courseId, 'c_la');
+
+  const bad = A.createPost(db, { board: 'notes', courseId: 'c_not_exist', body: '课程不存在时应该被拒绝。' }, NOW);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'bad_course');
+});
+
+test('建圈申请：目录外课程可申请，管理员通过后建课建圈并通知申请人', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  const applied = A.submitApplication(db, { courseName: ' 量子烹饪学 ', reason: '这学期开课' }, NOW);
+  assert.ok(applied.ok, applied.message);
+  const app = db.applications[db.applications.length - 1];
+  assert.equal(app.courseName, '量子烹饪学');
+  assert.equal(app.courseId, null);
+  assert.ok(A.submitApplication(db, { courseName: '量子烹饪学' }, NOW).ok, '重复申请幂等');
+  assert.equal(db.applications.filter((row) => row.courseName === '量子烹饪学').length, 1);
+  assert.equal(A.submitApplication(db, { courseName: '微积分Ⅰ' }, NOW).code, 'duplicate', '已有圈的课程不用申请');
+  assert.equal(A.submitApplication(db, { courseName: 'x' }, NOW).code, 'bad_course');
+  assert.equal(A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW).code, 'forbidden');
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  const done = A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW);
+  assert.ok(done.ok, done.message);
+  assert.equal(app.state, 'approved');
+  const course = db.courses.find((row) => row.name === '量子烹饪学');
+  assert.ok(course, '目录里新增了课程');
+  assert.equal(S.circleOfCourse(db, course.id).id, app.circleId);
+  assert.ok(db.notifications.some((n) => n.userId === 'u_qinghe' && n.text.includes('量子烹饪学')));
+  assert.equal(A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW).code, 'closed');
+});
+
+test('建圈申请：驳回必须写理由，并通知申请人', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.submitApplication(db, { courseName: '不存在的课' }, NOW).ok);
+  const app = db.applications[db.applications.length - 1];
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.equal(A.resolveApplication(db, { applicationId: app.id, action: 'reject' }, NOW).code, 'no_reason');
+  assert.ok(A.resolveApplication(db, { applicationId: app.id, action: 'reject', reason: '目录里已有同名课程' }, NOW).ok);
+  assert.equal(app.state, 'rejected');
+  assert.ok(db.notifications.some((n) => n.userId === 'u_qinghe' && n.text.includes('目录里已有同名课程')));
+});
+
+test('置顶：只有管理员能设置，帖子必须属于这个圈', () => {
+  const db = fresh();
+  const circle = S.circleOf(db, 'ci_calc_a');
+  circle.pinnedPostId = null;
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.equal(A.setCirclePin(db, { circleId: circle.id, postId: 'p_calc_notes' }, NOW).code, 'forbidden');
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.equal(A.setCirclePin(db, { circleId: circle.id, postId: 'p_py_copy' }, NOW).code, 'bad_post', '别的圈的帖子不能置顶');
+  assert.ok(A.setCirclePin(db, { circleId: circle.id, postId: 'p_calc_notes' }, NOW).ok);
+  assert.equal(circle.pinnedPostId, 'p_calc_notes');
+  assert.ok(A.setCirclePin(db, { circleId: circle.id, postId: null }, NOW).ok);
+  assert.equal(circle.pinnedPostId, null);
+});
+
+/* ---------- 拉黑、私信举报、圈内管理、注销 ---------- */
+
+function memberOf(db, circleId) {
+  const row = db.memberships.find((m) => m.circleId === circleId && m.status === 'active'
+    && S.userOf(db, m.userId).role !== 'admin' && m.userId !== 'u_qinghe');
+  assert.ok(row, '演示数据里应有其他成员');
+  return row.userId;
+}
+
+test('拉黑：双方不能互发私信，被拉黑的人不再触发提醒，取消后恢复', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.toggleFollowUser(db, { targetUserId: 'u_qinghe' }, NOW).ok);
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.setBlock(db, { userId: 'u_linjian', blocked: true }, NOW).ok);
+  assert.equal(A.setBlock(db, { userId: 'u_qinghe', blocked: true }, NOW).code, 'bad_user', '不能拉黑自己');
+  assert.ok(!db.follows.some((f) => f.followerId === 'u_linjian' && f.targetId === 'u_qinghe'), '拉黑后取消关注');
+  assert.equal(A.sendDirectMessage(db, { recipientId: 'u_linjian', body: '你好' }, NOW).code, 'blocked');
+
+  const post = A.createPost(db, { board: 'method', body: '拉黑测试用的帖子，正文写长一点满足规则。' }, NOW);
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.equal(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '在吗' }, NOW).code, 'blocked');
+  const before = db.notifications.filter((n) => n.userId === 'u_qinghe').length;
+  assert.ok(A.addComment(db, { postId: post.data.postId, body: '被拉黑的人留下的一条评论。' }, NOW).ok, '公开内容照常可评论');
+  assert.equal(db.notifications.filter((n) => n.userId === 'u_qinghe').length, before, '不再提醒拉黑方');
+
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.setBlock(db, { userId: 'u_linjian', blocked: false }, NOW).ok);
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '取消拉黑后可以发了' }, NOW).ok);
+});
+
+test('私信举报：附上对方发来的私信，管理员可删除，被举报人收到提醒', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.equal(A.reportContent(db, { targetType: 'dm', targetId: 'u_linjian', reason: '骚扰' }, NOW).code, 'no_evidence');
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '第一条骚扰内容' }, NOW).ok);
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '第二条骚扰内容' }, NOW).ok);
+
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_linjian', body: '请不要再发了' }, NOW).ok);
+  assert.ok(A.reportContent(db, { targetType: 'dm', targetId: 'u_linjian', reason: '骚扰', detail: '一直发' }, NOW).ok);
+  const report = db.reports[db.reports.length - 1];
+  assert.deepEqual(report.evidence.map((row) => row.body), ['第一条骚扰内容', '第二条骚扰内容'], '只附对方发来的私信');
+  assert.match(S.reportTargetLabel(db, report), /私信（2 条）/);
+
+  assert.equal(A.resolveReport(db, { reportId: report.id, action: 'remove', reason: '骚扰' }, NOW).code, 'forbidden');
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.equal(A.resolveReport(db, { reportId: report.id, action: 'hide', reason: '骚扰' }, NOW).code, 'bad_action');
+  assert.ok(A.resolveReport(db, { reportId: report.id, action: 'remove', reason: '骚扰' }, NOW).ok);
+  const removed = db.directMessages.filter((row) => row.senderId === 'u_linjian' && row.recipientId === 'u_qinghe');
+  assert.ok(removed.every((row) => row.status === 'removed'));
+  assert.ok(db.notifications.some((n) => n.userId === 'u_linjian' && n.text.includes('私信')), '被举报人收到提醒');
+  assert.ok(db.directMessages.some((row) => row.body === '请不要再发了' && row.status !== 'removed'), '举报人自己的私信不受影响');
+});
+
+test('圈内管理：禁言可设天数并自动到期，移出后需管理员允许才能重新加入', () => {
+  const db = fresh();
+  const circleId = 'ci_calc_a';
+  const userId = memberOf(db, circleId);
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.equal(A.setMemberRestriction(db, { circleId, userId, action: 'mute', reason: '刷屏' }, NOW).code, 'forbidden');
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.equal(A.setMemberRestriction(db, { circleId, userId, action: 'mute' }, NOW).code, 'no_reason');
+  assert.equal(A.setMemberRestriction(db, { circleId, userId: 'u_admin', action: 'mute', reason: 'x' }, NOW).code, 'forbidden');
+  assert.ok(A.setMemberRestriction(db, { circleId, userId, action: 'mute', days: 1, reason: '刷屏' }, NOW).ok);
+
+  A.quickLogin(db, { userId });
+  const blocked = A.createPost(db, { board: 'help', circleId, body: '禁言期间尝试发帖，应该被拦下来。' }, NOW);
+  assert.equal(blocked.code, 'restricted');
+  assert.match(blocked.message, /禁言到/);
+  assert.ok(db.notifications.some((n) => n.userId === userId && n.text.includes('禁言 1 天')));
+
+  S.membership(db, userId, circleId).restrictedUntil = new Date(NOW - 1000).toISOString();
+  assert.ok(A.createPost(db, { board: 'help', circleId, body: '禁言到期以后可以正常发帖了，长度足够。' }, NOW).ok, '到期自动恢复');
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.ok(A.setMemberRestriction(db, { circleId, userId, action: 'remove', reason: '多次违规' }, NOW).ok);
+  A.quickLogin(db, { userId });
+  assert.equal(A.joinCircle(db, { circleId }, NOW).code, 'removed_member');
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.ok(A.setMemberRestriction(db, { circleId, userId, action: 'restore' }, NOW).ok);
+  A.quickLogin(db, { userId });
+  assert.ok(A.joinCircle(db, { circleId }, NOW).ok, '允许后可以重新加入');
+  assert.ok(db.audit.some((row) => row.action === '移出课友圈'));
+});
+
+test('注销（保留内容）：资料匿名、私人数据删除、不能再操作，邮箱可以重新注册', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '注销前发的私信' }, NOW).ok);
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  const posts = db.posts.filter((post) => post.authorId === 'u_qinghe' && post.status === 'published').length;
+  assert.ok(posts > 0);
+  assert.equal(A.deleteAccount(db, { mode: 'anonymize', confirmText: '确认' }, NOW).code, 'need_confirm');
+  assert.equal(A.deleteAccount(db, { mode: 'oops', confirmText: '注销' }, NOW).code, 'bad_mode');
+  assert.ok(A.deleteAccount(db, { mode: 'anonymize', confirmText: '注销' }, NOW).ok);
+
+  const user = S.userOf(db, 'u_qinghe');
+  assert.equal(user.status, 'deleted');
+  assert.equal(user.email, '');
+  assert.equal(user.nickname, '已注销用户');
+  assert.equal(db.posts.filter((post) => post.authorId === 'u_qinghe' && post.status === 'published').length, posts, '内容保留');
+  assert.ok(!db.directMessages.some((row) => row.senderId === 'u_qinghe' || row.recipientId === 'u_qinghe'), '私信删除');
+  assert.ok(!db.notifications.some((row) => row.userId === 'u_qinghe'));
+  assert.equal(S.currentUser(db), null, '注销后会话结束');
+  db.session = { userId: 'u_qinghe' };
+  assert.equal(A.createPost(db, { board: 'method', body: '注销后的账号不能再发帖了。' }, NOW).code, 'login');
+
+  const again = A.verifyCode(db, { email: 'qinghe@example.com', code: A.DEMO_CODE });
+  assert.ok(again.ok);
+  assert.notEqual(again.data.user.id, 'u_qinghe', '同一邮箱注册的是新账号');
+});
+
+test('注销（删除内容）：帖子永久移除并按规则退回页签；管理员不能自助注销', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  const post = A.createPost(db, { board: 'method', body: '准备在注销时一起删除的帖子，长度足够。' }, NOW);
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.claimDaily(db, {}, NOW).ok);
+  const before = S.walletOf(db, 'u_linjian');
+  assert.ok(A.sendGift(db, { postId: post.data.postId, qty: 1, idemKey: 'del-1' }, NOW).ok);
+  assert.ok(A.addComment(db, { postId: post.data.postId, body: '别人在这篇下的评论。' }, NOW).ok);
+
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.deleteAccount(db, { mode: 'delete', confirmText: '注销' }, NOW).ok);
+  assert.ok(db.posts.filter((row) => row.authorId === 'u_qinghe').every((row) => row.status === 'removed'));
+  assert.ok(db.comments.filter((row) => row.authorId === 'u_qinghe').every((row) => row.status === 'removed'));
+  assert.equal(S.walletOf(db, 'u_linjian'), before, '送出的页签已退回');
+
+  A.quickLogin(db, { userId: 'u_admin' });
+  assert.equal(A.deleteAccount(db, { mode: 'delete', confirmText: '注销' }, NOW).code, 'admin');
+});
+
+test('个人数据导出：包含资料、内容、私信和记录，不含别人的举报证据', () => {
+  const db = fresh();
+  A.quickLogin(db, { userId: 'u_linjian' });
+  assert.ok(A.sendDirectMessage(db, { recipientId: 'u_qinghe', body: '导出里应该有这条' }, NOW).ok);
+  A.quickLogin(db, { userId: 'u_qinghe' });
+  assert.ok(A.reportContent(db, { targetType: 'dm', targetId: 'u_linjian', reason: '骚扰' }, NOW).ok);
+  const data = S.personalData(db, 'u_qinghe', NOW);
+  assert.equal(data.profile.email, 'qinghe@example.com');
+  assert.ok(data.posts.length > 0);
+  assert.ok(data.directMessages.some((row) => row.body === '导出里应该有这条'));
+  assert.equal(data.reportsFiled.length, 1);
+  assert.equal(data.reportsFiled[0].evidence, undefined, '举报证据是对方的内容，不随导出给出');
+  assert.equal(S.personalData(db, 'nope'), null);
 });

@@ -86,6 +86,8 @@ export function routeOf(loc = parseLocation()) {
   if (a === 'login') return { ...base, name: 'login' };
   if (a === 'admin') return { ...base, name: 'admin' };
   if (a === 'about') return { ...base, name: 'about' };
+  if (a === 'terms') return { ...base, name: 'terms' };
+  if (a === 'privacy') return { ...base, name: 'privacy' };
   return base;
 }
 

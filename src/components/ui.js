@@ -1,6 +1,7 @@
 /* 可复用的界面片段：帖子卡、资料卡、附件行、评论、空态、侧栏小组件 */
 
-import { esc, timeAgo, formatBytes, boardOf, truncate, stripMarkdown, TERMS, RESOURCE_TYPES, shanghaiDate } from '../lib/format.js';
+import { esc, timeAgo, formatBytes, boardOf, truncate, stripMarkdown, TERMS, RESOURCE_TYPES, shanghaiDate, mediaUrl } from '../lib/format.js';
+import { DEMO_SAMPLE_FILES } from '../state/actions.js';
 import { icon, avatar, fileIcon } from '../lib/icons.js';
 import { href } from '../router.js';
 import { renderMarkdown } from '../lib/markdown.js';
@@ -53,13 +54,14 @@ export function attachmentRow(ctx, att, opts = {}) {
   const { db, me } = ctx;
   const post = S.postOf(db, att.postId);
   const resource = S.resourceForPost(db, att.postId);
-  const canDownload = att.status === 'ready' && att.path;
+  const production = ctx.config?.mode === 'production';
+  const canDownload = att.status === 'ready' && (production ? !!att.uploadId : !!att.path);
   const blocked = att.downloadBlocked;
   const metaBits = [
     'PDF',
     att.pages ? `${att.pages} 页` : null,
     att.sizeBytes ? formatBytes(att.sizeBytes) : null,
-    `v${att.version}`
+    opts.compact ? null : `v${att.version}`
   ].filter(Boolean);
 
   let actionHtml = '';
@@ -82,10 +84,120 @@ export function attachmentRow(ctx, att, opts = {}) {
     ${fileIcon(att.status === 'ready' || att.status === 'processing' ? 'pdf' : 'unavailable')}
     <div class="grow">
       <div class="file-name">${esc(att.name)}</div>
-      <div class="file-meta">${metaBits.join(' · ')}${att.changeNote ? ` · ${esc(att.changeNote)}` : ''} ${statusPill(att)}</div>
+      <div class="file-meta">${metaBits.join(' · ')}${att.changeNote && !opts.compact ? ` · ${esc(att.changeNote)}` : ''} ${statusPill(att)}</div>
     </div>
     <div class="file-actions">${actionHtml}</div>
   </div>`;
+}
+
+/* 资料页和帖子页共享同一条真实上传链；生产模式绝不显示样例选择器。 */
+export function pdfUploadField(ctx, { required = false, samples = [] } = {}) {
+  const production = ctx.config?.mode === 'production';
+  const ui = ctx.ui || {};
+  const files = ui.files || [];
+  const maxBytes = Math.min(20971520, Number(ctx.config?.filePolicy?.maxBytes) || 20971520);
+  const unavailable = production && ctx.config?.filePolicy?.uploadReady === false;
+  const busy = !!ui.uploading || !!ui.publishing;
+  return `<div class="field pdf-upload">
+    <label for="pdf-upload">PDF 附件 <span class="label-hint">${required ? '1–3 个' : '最多 3 个'} · 单个 ≤ ${formatBytes(maxBytes)}</span></label>
+    ${production ? `<input id="pdf-upload" type="file" accept="application/pdf" multiple data-upload="pdf" ${busy || unavailable || files.length >= 3 ? 'disabled' : ''} aria-describedby="pdf-upload-help">
+      <p id="pdf-upload-help" class="field-help">${unavailable
+        ? '上传服务暂不可用：文件扫描服务尚未配置或未就绪。不能上传或假装成功，请联系维护者。'
+        : '先勾选文档来源确认，再选择已有 PDF。文件由服务器检查，只有检查通过的上传才能发布。'}</p>`
+      : `<div class="row wrap"><select class="select" data-file-picker style="max-width:340px">${samples.map((file, index) => `<option value="${index}">${esc(file.label)}</option>`).join('')}</select>
+        <button class="btn btn-ghost btn-sm" type="button" data-action="add-file">添加 PDF</button></div>
+        <p class="field-help">独立本地演示只使用包内示例 PDF，不会真的上传文件。</p>`}
+    <p class="field-help upload-status" role="status" aria-live="polite">${ui.uploading ? `正在上传并检查 ${esc(ui.uploadName || 'PDF')}，暂不能发布…` : ''}</p>
+    ${ui.uploadError ? `<p class="field-error" role="alert">${esc(ui.uploadError)}</p>` : ''}
+    ${files.length ? files.map((file, index) => `<div class="attachment">
+      <img src="assets/art/file-pdf.svg" alt="PDF" width="34" height="40">
+      <div class="grow"><div class="file-name">${esc(file.name)}</div>
+        <div class="file-meta">PDF · ${file.pages ? `${esc(file.pages)} 页` : '页数待确认'} · ${formatBytes(file.sizeBytes)} · ${production ? '已通过服务器检查' : '演示文件'}</div></div>
+      <button class="btn btn-quiet btn-sm" type="button" data-action="remove-file" data-index="${index}" ${busy ? 'disabled' : ''}>移除</button>
+    </div>`).join('') : `<p class="field-help">${required ? '至少需要 1 个已通过检查的 PDF。' : '提问与讨论可以只发文字。'}</p>`}
+  </div>`;
+}
+
+export function sourceRightsFields({ prefix = 'resource', source = '', rights = '' } = {}) {
+  return `<div class="field">
+    <label for="${prefix}-source">资料来源 <span class="label-hint">说明作者、出处或授权依据，至少 4 字</span></label>
+    <textarea class="textarea" id="${prefix}-source" name="source" rows="2" minlength="4" maxlength="1000" placeholder="例如：本人整理的课程笔记；或原作者、公开链接与许可说明">${esc(source)}</textarea>
+  </div>
+  <div class="field">
+    <label for="${prefix}-rights">分享授权</label>
+    <select class="select" id="${prefix}-rights" name="rights">
+      <option value="">请选择授权类型</option>
+      ${['原创', '已授权', '公开许可'].map((value) => `<option value="${value}" ${rights === value ? 'selected' : ''}>${value}</option>`).join('')}
+    </select>
+    <p class="field-help">仅拥有文件不等于拥有传播权。教师课件、教材节选等也须说明授权，不上传整本商业教材。</p>
+  </div>`;
+}
+
+/** 帖子操作条：列表卡与详情页共用，手机上四项等宽排成一行 */
+export function postActions({ post, liked, likes, saved, saves, gifts, comments, commentControl }) {
+  const count = (value) => (value ? `<span class="act-count">${value}</span>` : '');
+  return `
+    <div class="post-actions">
+      <button class="act" type="button" data-action="toggle-like" data-post="${esc(post.id)}"
+        aria-pressed="${liked}" aria-label="${liked ? '取消赞' : '点赞'}">
+        ${icon('heart')}<span>${liked ? '已赞' : '赞'}</span>${count(likes)}
+      </button>
+      ${commentControl(`${icon('comment')}<span>评论</span>${count(comments)}`)}
+      <button class="act" type="button" data-action="toggle-save" data-post="${esc(post.id)}"
+        aria-pressed="${saved}" aria-label="${saved ? '取消收藏' : '收藏'}">
+        ${icon('star')}<span>${saved ? '已收藏' : '收藏'}</span>${count(saves)}
+      </button>
+      <button class="act act-gift" type="button" data-action="open-gift" data-post="${esc(post.id)}"
+        aria-label="送页签">
+        ${icon('bookmark')}<span>送页签</span>${count(gifts)}
+      </button>
+    </div>`;
+}
+
+/** PDF 附件：试用后端上传真实文件；静态演示版没有服务端，只能选示例文件 */
+export function pdfPicker(ctx, files, { emptyHint = '' } = {}) {
+  const real = !!(ctx.config && ctx.config.mode === 'production');
+  const rows = files.map((file, index) => `
+    <div class="attachment">
+      <img src="assets/art/file-pdf.svg" alt="PDF" width="34" height="40">
+      <div class="grow">
+        <div class="file-name">${esc(file.name)}</div>
+        <div class="file-meta">${file.status === 'uploading'
+          ? `<span class="upload-progress" aria-hidden="true"><span data-upload-progress="${esc(file.localId)}" style="width:${Math.round((file.progress || 0) * 100)}%"></span></span>上传中…`
+          : `PDF · ${file.pages ? `${file.pages} 页 · ` : ''}${formatBytes(file.sizeBytes)}${file.demo ? ' · 演示文件' : file.previewCount ? ' · 已生成预览' : ''}`}</div>
+      </div>
+      <button class="btn btn-quiet btn-sm" type="button" data-action="remove-file" data-index="${index}">移除</button>
+    </div>`).join('');
+  const picker = real
+    ? `<label class="btn btn-ghost btn-sm upload-button">${icon('upload', 'i-sm')}选择 PDF
+        <input class="visually-hidden" type="file" accept="application/pdf,.pdf" multiple data-upload="pdf">
+      </label>
+      <span class="tiny muted">最多 3 个 · 单个不超过 20 MiB</span>`
+    : `<div class="grow file-picker-field">
+        <select class="select" data-file-picker aria-label="选择示例 PDF">
+          ${DEMO_SAMPLE_FILES.map((file, index) => `<option value="${index}">${esc(file.label)}</option>`).join('')}
+        </select>
+      </div>
+      <button class="btn btn-ghost btn-sm" type="button" data-action="add-file">添加附件</button>`;
+  return `<div class="row wrap">${picker}</div>
+    ${rows || (emptyHint ? `<p class="field-help">${esc(emptyHint)}</p>` : '')}
+    <p class="field-help">${real
+      ? '上传后会检查是否为有效 PDF，并自动生成前两页预览。请不要上传整本教材或他人隐私。'
+      : '演示版不能上传真实文件，这里用明确标注的示例 PDF 走通流程。'}</p>`;
+}
+
+/** 发布页顶部的类型切换：发帖子 / 分享资料共用一个入口 */
+export function publishSwitch(current, query = null) {
+  const items = [
+    { key: 'post', label: '发帖子', hint: '笔记、心得、提问', to: '/publish' },
+    { key: 'resource', label: '分享资料', hint: '附 PDF，进入找资料', to: '/publish/resource' }
+  ];
+  return `<nav class="publish-switch" aria-label="发布类型">
+    ${items.map((item) => `<a class="publish-option ${current === item.key ? 'is-active' : ''}"
+      href="${href(item.to, query)}" ${current === item.key ? 'aria-current="page"' : ''}>
+      <b>${esc(item.label)}</b><span>${esc(item.hint)}</span>
+    </a>`).join('')}
+  </nav>`;
 }
 
 export function postCard(ctx, post, options = {}) {
@@ -114,21 +226,25 @@ export function postCard(ctx, post, options = {}) {
   const images = (post.images || []).length
     ? `<div class="photos">${(post.images || []).slice(0, 3).map((src, index) => `
         <a href="${href(`/posts/${post.id}`)}" aria-label="查看第 ${index + 1} 张图片">
-          <img src="${esc(src)}" alt="帖子配图 ${index + 1}" loading="lazy">
+          <img src="${esc(mediaUrl(src))}" alt="帖子配图 ${index + 1}" loading="lazy">
         </a>`).join('')}
         ${(post.images || []).length > 3 ? `<span class="tag">+${(post.images || []).length - 3}</span>` : ''}
       </div>`
     : '';
 
   const attachmentHtml = attachments.length
-    ? attachments.map((att) => attachmentRow(ctx, att)).join('')
+    ? attachments.map((att) => attachmentRow(ctx, att, { compact: true })).join('')
     : '';
 
   const tagBits = [];
+  if (indexed) tagBits.push(`<a class="chip chip-sm" href="${href(`/resources/${resource.id}`)}">${icon('file', 'i-sm')}收录于找资料</a>`);
   if (post.tags && post.tags.length) {
     tagBits.push(...post.tags.map((t) => `<span class="tag-item">${esc(t)}</span>`));
   }
-  if (course) tagBits.push(`<span class="tag-item">${esc(course.name)}</span>`);
+  // 圈标记已经显示课程名；不挂圈的帖子才单独标课程
+  if (course && !circle) tagBits.push(`<span class="tag-item">${esc(course.name)}</span>`);
+  if (post.term) tagBits.push(`<span class="tag-item">${esc(post.term)}</span>`);
+  if (post.chapter) tagBits.push(`<span class="tag-item">${esc(post.chapter)}</span>`);
   if (circle) tagBits.push('<span class="tag-item">课程圈</span>');
 
   return `
@@ -144,28 +260,12 @@ export function postCard(ctx, post, options = {}) {
     ${post.stickerId ? `<div class="sticker-wrap">${stickerMarkup(post.stickerId)}</div>` : ''}
     ${images}
     ${attachmentHtml}
-    <div class="post-tags">
-      ${indexed ? `<a class="chip chip-sm" href="${href(`/resources/${resource.id}`)}">${icon('file', 'i-sm')}收录于找资料</a>` : ''}
-      ${tagBits.join('')}
-    </div>
-    <div class="post-actions">
-      <button class="act" type="button" data-action="toggle-like" data-post="${esc(post.id)}"
-        aria-pressed="${liked}" aria-label="${liked ? '取消赞' : '点赞'}">
-        ${icon('heart')}${liked ? '已赞' : '赞'}${likes ? ` ${likes}` : ''}
-      </button>
-      <a class="act" href="${href(`/posts/${post.id}`)}#comments">
-        ${icon('comment')}评论${commentCountValue ? ` ${commentCountValue}` : ''}
-      </a>
-      <button class="act" type="button" data-action="toggle-save" data-post="${esc(post.id)}"
-        aria-pressed="${saved}" aria-label="${saved ? '取消收藏' : '收藏'}">
-        ${icon('star')}${saved ? '已收藏' : '收藏'}${saves ? ` ${saves}` : ''}
-      </button>
-      <button class="act act-gift" type="button" data-action="open-gift" data-post="${esc(post.id)}"
-        aria-label="送页签">
-        ${icon('bookmark')}送页签${gifts ? ` · ${gifts}` : ''}
-      </button>
-      <a class="act act-more" href="${href(`/posts/${post.id}`)}" aria-label="打开帖子详情">${icon('more')}</a>
-    </div>
+    ${tagBits.length ? `<div class="post-tags">${tagBits.join('')}</div>` : ''}
+    ${postActions({
+      post, liked, likes, saved, saves, gifts,
+      comments: commentCountValue,
+      commentControl: (inner) => `<a class="act" href="${href(`/posts/${post.id}`, { focus: 'comments' })}">${inner}</a>`
+    })}
   </article>`;
 }
 

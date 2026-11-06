@@ -1,0 +1,29 @@
+# 共页 systemd 单元示例（不使用 Docker 时）。复制到 /etc/systemd/system/gongye.service
+# 前置：Node >= 22.13 安装在 /usr/bin/node，代码在 /opt/gongye，运行用户 gongye，
+# clamd 本机监听 127.0.0.1:3310，环境变量写在 /etc/gongye.env（chmod 600）。
+[Unit]
+Description=Gongye course-sharing service (single instance)
+After=network-online.target clamav-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gongye
+Group=gongye
+WorkingDirectory=/opt/gongye
+EnvironmentFile=/etc/gongye.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server/index.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# 只能写数据目录，其余文件系统只读
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gongye
+StateDirectory=gongye
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# 说明：仅构建部署镜像用，运行时数据不进入镜像。
+node_modules
+.git
+.gitignore
+.tmp-*
+.tmp-smoke
+tests/.tmp-*
+tests/.files-*
+server/data
+server/uploads
+*.log
+.env
+.pack

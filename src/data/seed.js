@@ -7,11 +7,17 @@
 
 import { applyArtV3 } from './demo-v3.js';
 import { removeKnownDemoPosts } from './demo-post-cleanup.js';
+import { ZJU_COURSES, ZJU_TERM, ZJU_SCHOOL } from './zju-courses-2026aw.js';
 
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 
-export function createSeed(now = Date.now()) {
+/**
+ * @param {number} now 基准时间
+ * @param {{ keepDemoPosts?: boolean }} [options] 测试用：保留演示帖子，让规则测试有内容可测。
+ *   默认仍按固定清单移除，新访客看到的是空站。
+ */
+export function createSeed(now = Date.now(), options = {}) {
   const iso = (ms) => new Date(ms).toISOString();
   const at = (hoursAgo) => iso(now - hoursAgo * HOUR);
   const atDay = (daysAgo) => iso(now - daysAgo * DAY);
@@ -48,12 +54,12 @@ export function createSeed(now = Date.now()) {
   ];
 
   const courses = [
-    { id: 'c_calc', school: '示例大学', name: '微积分Ⅰ', code: null, category: '数学基础' },
-    { id: 'c_la', school: '示例大学', name: '线性代数', code: null, category: '数学基础' },
-    { id: 'c_py', school: '示例大学', name: 'Python 程序设计', code: null, category: '计算机' },
-    { id: 'c_ds', school: '示例大学', name: '数据结构', code: null, category: '计算机' },
-    { id: 'c_prob', school: '示例大学', name: '概率论与数理统计', code: null, category: '数学基础' },
-    { id: 'c_phys', school: '示例大学', name: '大学物理Ⅱ', code: null, category: '物理' },
+    { id: 'c_calc', school: '浙江大学', name: '微积分Ⅰ', code: 'MATH1001', category: '数学基础' },
+    { id: 'c_la', school: '浙江大学', name: '线性代数', code: 'MATH1002', category: '数学基础' },
+    { id: 'c_py', school: '浙江大学', name: 'Python 程序设计', code: 'CS1003', category: '计算机' },
+    { id: 'c_ds', school: '浙江大学', name: '数据结构', code: 'CS2001', category: '计算机' },
+    { id: 'c_prob', school: '浙江大学', name: '概率论与数理统计', code: 'MATH2001', category: '数学基础' },
+    { id: 'c_phys', school: '浙江大学', name: '大学物理Ⅱ', code: 'PHYS1002', category: '物理' },
     { id: 'c_general', school: '通用·不限学校', name: '通用学习', code: null, category: '学习方法' }
   ];
 
@@ -85,6 +91,29 @@ export function createSeed(now = Date.now()) {
       inviteCode: 'GY-PHYS', createdAt: atDay(24), pinnedPostId: null
     }
   ];
+
+  /* 浙大 2026-2027 秋冬开课课程：清单只有课程名，一门课一个圈。
+   * 与演示课程同名的（数据结构、概率论与数理统计）复用课程和已有的圈。 */
+  const zjuCourses = [];
+  for (const [index, entry] of ZJU_COURSES.entries()) {
+    const existing = courses.find((course) => course.name === entry.name);
+    const courseId = existing ? existing.id : entry.id;
+    if (!existing) {
+      zjuCourses.push({ id: entry.id, school: ZJU_SCHOOL, name: entry.name, code: null, category: '本科课程' });
+    }
+    if (circles.some((circle) => circle.courseId === courseId)) continue;
+    const key = String(entry.id).replace(/^zj_/, '');
+    circles.push({
+      id: `zjc_${key}`,
+      courseId,
+      status: 'active',
+      createdBy: 'u_admin',
+      inviteCode: `ZJ-${key.toUpperCase()}`,
+      createdAt: iso(now - (index + 1) * 1000),
+      pinnedPostId: null
+    });
+  }
+  courses.push(...zjuCourses);
 
   const memberships = [];
   const mem = (userId, circleId, extra = {}) => {
@@ -310,7 +339,21 @@ export function createSeed(now = Date.now()) {
     publishedAt: at(0.5)
   });
 
-  /* 13. 扫描失败的附件 */
+  /* 13. 作者未开启公开索引 */
+  post({
+    id: 'p_derivative_draft', authorId: 'u_zhixia', board: 'notes',
+    circleId: 'ci_calc_a', courseId: 'c_calc',
+    title: '个人草稿：导数公式手写版',
+    body: '自己用的手写版，暂时不放到找资料里，等补完再公开。',
+    attachmentIds: [addAttachment('p_derivative_draft', {
+      name: '导数公式手写版.pdf', sizeBytes: 800000, pages: 6, version: 1,
+      path: 'assets/samples/demo-calculus-notes.pdf'
+    })],
+    tags: ['导数'],
+    publishedAt: at(4)
+  });
+
+  /* 14. 扫描失败的附件 */
   post({
     id: 'p_calc_failed', authorId: 'u_linjian', board: 'notes',
     circleId: null, courseId: 'c_calc',
@@ -324,7 +367,7 @@ export function createSeed(now = Date.now()) {
     publishedAt: at(9)
   });
 
-  /* 14. 物理讨论（无附件，含代码块） */
+  /* 15. 物理讨论（无附件，含代码块） */
   post({
     id: 'p_phys_circuit', authorId: 'u_zhixia', board: 'course',
     circleId: null, courseId: 'c_phys',
@@ -338,7 +381,7 @@ export function createSeed(now = Date.now()) {
   const resources = [
     {
       id: 'r_calc_notes', postId: 'p_calc_notes', title: '数列极限与函数连续 · 期中复习笔记',
-      courseId: 'c_calc', school: '示例大学', term: '2026秋', type: '复习整理',
+      courseId: 'c_calc', school: '浙江大学', term: '2026秋', type: '复习整理',
       coverage: '数列极限、函数极限与连续性；含夹逼与单调有界的推导过程',
       limitations: '不含导数、中值定理；第 12 页之后为草稿，请结合本学期进度使用',
       indexEnabled: true, status: 'indexed', updatedAt: at(3),
@@ -346,7 +389,7 @@ export function createSeed(now = Date.now()) {
     },
     {
       id: 'r_calc_problems', postId: 'p_calc_problems', title: '数列极限典型题 · 思路分类与错题',
-      courseId: 'c_calc', school: '示例大学', term: '2026秋', type: '题解',
+      courseId: 'c_calc', school: '浙江大学', term: '2026秋', type: '题解',
       coverage: '单调有界、夹逼、递推关系三类题型的做法对照',
       limitations: '只有 12 道题，不是完整题库；不含答案以外的解法讨论',
       indexEnabled: true, status: 'indexed', updatedAt: at(26),
@@ -354,7 +397,7 @@ export function createSeed(now = Date.now()) {
     },
     {
       id: 'r_la_solutions', postId: 'p_la_solutions', title: '行列式与矩阵典型题（含换列变号说明）',
-      courseId: 'c_la', school: '示例大学', term: '2026秋', type: '题解',
+      courseId: 'c_la', school: '浙江大学', term: '2026秋', type: '题解',
       coverage: '行列式定义与性质、初等变换、三道典型题的完整推导',
       limitations: '未覆盖特征值与二次型',
       indexEnabled: true, status: 'indexed', updatedAt: at(20),
@@ -362,7 +405,7 @@ export function createSeed(now = Date.now()) {
     },
     {
       id: 'r_py_notes', postId: 'p_py_notes', title: 'Python 前四章语法速查 + 踩坑记录',
-      courseId: 'c_py', school: '示例大学', term: '2026秋', type: '笔记',
+      courseId: 'c_py', school: '浙江大学', term: '2026秋', type: '笔记',
       coverage: '变量与类型、条件与循环、函数与作用域、常见报错',
       limitations: '不含面向对象与文件操作；示例按本学期教学班进度整理',
       indexEnabled: true, status: 'indexed', updatedAt: at(30),
@@ -370,7 +413,7 @@ export function createSeed(now = Date.now()) {
     },
     {
       id: 'r_ds_notes', postId: 'p_ds_notes', title: '树与图遍历手写笔记（含复杂度对照表）',
-      courseId: 'c_ds', school: '示例大学', term: '2026秋', type: '笔记',
+      courseId: 'c_ds', school: '浙江大学', term: '2026秋', type: '笔记',
       coverage: '二叉树三种遍历、BFS/DFS、邻接表与矩阵的复杂度',
       limitations: '不含平衡树与最短路径算法的证明',
       indexEnabled: true, status: 'indexed', updatedAt: at(40),
@@ -378,7 +421,7 @@ export function createSeed(now = Date.now()) {
     },
     {
       id: 'r_calc_old', postId: 'p_calc_old', title: '2025 秋期末复习：极限与连续',
-      courseId: 'c_calc', school: '示例大学', term: '2025秋', type: '复习整理',
+      courseId: 'c_calc', school: '浙江大学', term: '2025秋', type: '复习整理',
       coverage: '2025 秋期末范围内的极限计算与连续性判断',
       limitations: '学期不同，章节顺序与今年不一致；仅作参考',
       indexEnabled: true, status: 'indexed', updatedAt: atDay(300),
@@ -625,14 +668,13 @@ export function createSeed(now = Date.now()) {
 
   const db = {
     version: 4,
-    seedVersion: 7,
+    seedVersion: 6,
     createdAt: iso(now),
     demo: true,
     session: null,
     users,
     courses,
     circles,
-    circleInviteAliases: [],
     memberships,
     posts,
     attachments,
@@ -652,7 +694,6 @@ export function createSeed(now = Date.now()) {
     gifts,
     xp,
     notifications,
-    directMessages: [],
     reports,
     audit,
     events,
@@ -664,7 +705,7 @@ export function createSeed(now = Date.now()) {
   // Art V3：8 个生活化账号、12 条帖子的语气与页页表情（在既有结构上就地替换）
   const seeded = applyArtV3(db, now);
   // 固定演示帖子不再公开出现在新初始化的数据里。
-  removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
+  if (options.keepDemoPosts === false) removeKnownDemoPosts(seeded, { now, reason: '初始化时移除已确认的源码演示帖子' });
   return seeded;
 }
 

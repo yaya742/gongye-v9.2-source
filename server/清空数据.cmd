@@ -1,23 +1,8 @@
 @echo off
 chcp 65001 >nul
-title 共页 · 清空试用数据
+title 共页 · 旧版清理命令已停用
 cd /d "%~dp0.."
-
-echo 即将删除试用数据：
-echo   server\data\
-echo.
-choice /c YN /m "确定清空吗（同事账号、帖子、页签都会删除）"
-if errorlevel 2 goto :cancel
-
-if exist "server\data" (
-  rmdir /s /q "server\data"
-  echo 已清空。下次启动会重新生成演示数据。
-) else (
-  echo 没有找到数据目录，无需清理。
-)
+echo [已停用] v10生产数据与私有文件必须成套备份，不可用旧演示清理脚本删除。
+echo 请阅读 DEPLOY_PRODUCTION.md，停止服务并由运营方确认备份与保留策略。
 pause
-exit /b 0
-
-:cancel
-echo 已取消。
-pause
+exit /b 1

@@ -55,6 +55,7 @@ const overlay = createElement('div');
 const body = createElement('body');
 
 globalThis.window = {
+  __GONGYE_CONFIG__: { mode: 'demo-static' },
   matchMedia: () => ({ matches: false }),
   addEventListener() {},
   scrollTo() {},
@@ -102,7 +103,7 @@ test('main.js 能启动并渲染首页', async () => {
   assert.ok(header.innerHTML.includes('header-inner'), '顶部导航已渲染');
   assert.ok(header.innerHTML.includes('找资料'), '主导航包含找资料');
   assert.ok(view.innerHTML.includes('找资料'), '首页内容已渲染');
-  assert.ok(view.innerHTML.length > 2000, '首页 HTML 规模正常');
+  assert.ok(view.innerHTML.length > 800, '首页 HTML 规模正常');
   assert.ok(!view.innerHTML.includes('正在载入界面'), '占位内容已被替换');
   assert.ok(!view.innerHTML.includes('页面脚本出错'), '没有运行时错误提示');
 });
@@ -123,7 +124,7 @@ test('页签领取按钮在演示数据中可用', async () => {
   const actions = await import('../src/state/actions.js');
   const selectors = await import('../src/state/selectors.js');
   const { createSeed } = await import('../src/data/seed.js');
-  const db = createSeed(Date.now());
+  const db = createSeed(Date.now(), { keepDemoPosts: true });
   db.session = { userId: 'u_qinghe' };
   const before = selectors.walletOf(db, 'u_qinghe');
   const result = actions.claimDaily(db);

@@ -4,8 +4,8 @@ import { href } from '../router.js';
 import * as S from '../state/selectors.js';
 import { DEMO_SAMPLE_FILES } from '../state/actions.js';
 import {
-  resourceCard, emptyState, notice, signCard, icon, avatar, authorLine,
-  attachmentRow, commentList, commentForm, statusPill
+  resourceCard, emptyState, notice, signCard, bookmarkBoardCard, icon, avatar, authorLine,
+  attachmentRow, commentList, commentForm, statusPill, pdfUploadField, sourceRightsFields
 } from '../components/ui.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { esc, truncate, formatBytes, timeAgo, boardOf, RESOURCE_TYPES, SCHOOLS, TERMS } from '../lib/format.js';
@@ -40,18 +40,7 @@ export function resources(ctx) {
   const filters = filterValues(route);
   const result = S.searchResources(db, filters);
   const shown = result.items.slice(0, 6);
-  const coursesById = new Map((db.courses || []).map((course) => [course.id, course]));
-  const courseCounts = new Map();
-  S.searchResources(db, { sort: 'recent' }).items.forEach(({ resource }) => {
-    if (resource.courseId && resource.courseId !== 'c_general') {
-      courseCounts.set(resource.courseId, (courseCounts.get(resource.courseId) || 0) + 1);
-    }
-  });
-  const courses = Array.from(courseCounts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([courseId]) => coursesById.get(courseId))
-    .filter(Boolean);
+  const courses = (db.courses || []).filter((c) => c.id !== 'c_general').slice(0, 5);
 
   /* 最新讨论：不带附件的帖子（求助 / 讨论 / 学习方法）不会进"资料"列表，
    * 以前只能在搜索结果或作者主页看到，别人根本刷不到 —— 首页补一块。 */
@@ -59,71 +48,175 @@ export function resources(ctx) {
   const latestDiscuss = S.feedPosts(db, { limit: 40 })
     .items.filter((post) => !resourcePostIds.has(post.id))
     .slice(0, 5);
-  const discussions = latestDiscuss.length ? `<section class="card mt-4" aria-label="最新讨论">
-    <div class="toolbar">
-      <div class="section-title">最新讨论</div>
-      <span class="grow"></span>
-      <a class="tiny link" href="${href('/search')}">看全部讨论 →</a>
-    </div>
-    <ul class="discuss-list">
-      ${latestDiscuss.map((post) => {
-        const author = S.userOf(db, post.authorId);
-        const label = boardOf(post.board).label;
-        return `<li>
-          <span class="tag">${esc(label)}</span>
-          <a class="discuss-title" href="${href(`/posts/${post.id}`)}">${esc(post.title || truncate(post.body || '', 24))}</a>
-          <span class="discuss-meta">${esc(author ? author.nickname : '同学')} · ${timeAgo(post.publishedAt)}${S.commentCount(db, post.id) ? ` · 评论 ${S.commentCount(db, post.id)}` : ''}</span>
-        </li>`;
-      }).join('')}
-    </ul>
-  </section>` : '';
-  const hasFilters = Object.entries(filters).some(([key, value]) => key !== 'sort' && !!value);
+
+  const typeChips = ['', ...RESOURCE_TYPES].map((type) => {
+    const label = type || '全部类型';
+    return `<a class="chip ${filters.type === type ? 'is-active' : ''}"
+      href="${href('/resources', { q: filters.q, type, sort: filters.sort })}">${esc(label)}</a>`;
+  }).join('');
 
   const list = shown.length
     ? shown.map((item) => resourceCard(ctx, item)).join('')
     : emptyState({
       img: 'empty-search.svg',
-      title: hasFilters ? '没有找到匹配的资料' : '还没有可展示的资料',
-      text: hasFilters
-        ? '调整关键词或筛选条件，或者发布一份资料。'
-        : '发布一份整理好的课程资料，让同学更容易找到。',
-      actions: `${hasFilters ? `<a class="btn btn-ghost btn-sm" href="${href('/resources')}">清除筛选</a>` : ''}
-        <a class="btn btn-sm" href="${href('/publish')}">发布资料</a>`
+      mascot: true,
+      title: '这里还没有匹配的资料',
+      text: '可以换个关键词，或者清除筛选看看最近上新的整理。',
+      actions: `<a class="btn btn-ghost btn-sm" href="${href('/resources')}">清除筛选</a>
+        
+        <a class="btn btn-sm" href="${href('/find-circles')}">去课友圈问问</a>`
     });
 
   return `
-  <div class="layout-1 resource-home">
+  <div class="container">
+    <div class="layout-3">
+      <aside class="rail rail-sticky" aria-label="资料筛选">
+        
+        <div class="rail-group">
+        
+          <div class="rail-title">资料类型</div>
+        
+          ${['', ...RESOURCE_TYPES].map((type) => `
+        
+            <a class="rail-link" href="${href('/resources', { q: filters.q, type })}"
+        
+              ${filters.type === type ? 'aria-current="page"' : ''}>${esc(type || '全部资料')}</a>`).join('')}
+        
+        </div>
+        
+        <div class="rail-sep"></div>
+        
+        <div class="rail-group">
+        
+          <div class="rail-title">按课程</div>
+        
+          ${courses.map((course) => `
+        
+            <a class="rail-link" href="${href('/resources', { courseId: course.id })}">
+        
+              ${esc(course.name)}<small>${esc(course.school)}</small>
+        
+            </a>`).join('')}
+        
+        </div>
+        
+        <div class="rail-sep"></div>
+        
+        <a class="rail-link" href="${href('/resources')}">${icon('refresh')}重置筛选</a>
+      </aside>
+
       <main>
+        
         <section class="card res-search">
+        
           <h1>找资料</h1>
-          <p>按课程搜索笔记、题解和复习资料；下载需要登录。</p>
+        
+          <p>按课程找到笔记、题解与复习整理。先看适用范围与预览；下载需要登录，不要求加入课友圈。</p>
+        
           <form class="search-bar" data-form="filter" role="search">
+        
             <div class="input-wrap">
+        
               ${icon('search', 'i-sm')}
+        
               <label class="visually-hidden" for="res-q">搜索资料</label>
+        
               <input id="res-q" name="q" type="search" value="${esc(filters.q)}"
-                placeholder="搜课程、章节或标题">
+        
+                
+        placeholder="搜本页资料：课程、章节或标题">
+        
             </div>
+        
             ${filters.type ? `<input type="hidden" name="type" value="${esc(filters.type)}">` : ''}
+        
             ${filters.sort ? `<input type="hidden" name="sort" value="${esc(filters.sort)}">` : ''}
+        
             <button class="btn" type="submit">搜索</button>
+        
           </form>
-          ${courses.length ? `<div class="home-course-links">
-            <span class="tiny muted">有资料的课程</span>
-            <div class="chips">${courses.map((course) => `<a class="chip chip-sm" href="${href('/resources', { courseId: course.id })}">${esc(course.name)}</a>`).join('')}</div>
-            <a class="tiny link" href="${href('/resources')}">全部资料 →</a>
-          </div>` : ''}
+        
+          <div class="chips mt-3">
+        
+            ${courses.map((course) => `<a class="chip chip-sm" href="${href('/resources', { courseId: course.id })}">${esc(course.name)}</a>`).join('')}
+        
+          </div>
+        
+          <p class="tiny muted mt-3">按课程与用途挑一份，先看适用范围和前两页预览。</p>
+        
         </section>
 
-        ${shown.length ? `<div class="toolbar mt-4">
-          <div class="section-title">最近资料</div>
-          ${result.total > shown.length ? `<span class="grow"></span><a class="tiny link" href="${href('/resources', { q: filters.q })}">查看全部 ${result.total} 份 →</a>` : ''}
-        </div>` : ''}
+        
+        <div class="mobile-bookmark">${signCard(ctx)}</div>
+
+        ${latestDiscuss.length ? `<section class="card mt-4" aria-label="最新讨论">
+
+          <div class="toolbar">
+
+            <div class="section-title">最新讨论</div>
+
+            <span class="grow"></span>
+
+            <a class="tiny link" href="${href('/search')}">看全部讨论 →</a>
+
+          </div>
+
+          <ul class="discuss-list">
+
+            ${latestDiscuss.map((post) => {
+              const author = S.userOf(db, post.authorId);
+              const label = boardOf(post.board).label;
+              return `<li>
+                <span class="tag">${esc(label)}</span>
+                <a class="discuss-title" href="${href(`/posts/${post.id}`)}">${esc(post.title || truncate(post.body || '', 24))}</a>
+                <span class="discuss-meta">${esc(author ? author.nickname : '同学')} · ${timeAgo(post.publishedAt)}${S.commentCount(db, post.id) ? ` · 评论 ${S.commentCount(db, post.id)}` : ''}</span>
+              </li>`;
+            }).join('')}
+
+          </ul>
+
+          <p class="tiny muted mt-2">求助、踩坑、学习心得都在这儿；刚发的排最前。</p>
+
+        </section>` : ''}
+
+        <div class="toolbar">
+        
+          <div class="chips">${typeChips}</div>
+        
+          <span class="grow"></span>
+        
+          <a class="tiny link" href="${href('/resources', { q: filters.q })}">全部结果 →</a>
+        
+        </div>
+
+        
         ${list}
-        ${discussions}
+
+        
+        ${shown.length ? `<div class="card center">
+        
+          <a class="link" href="${href('/resources', { q: filters.q })}">查看全部 ${result.total} 份资料</a>
+        
+        </div>` : ''}
       </main>
+
+      <aside class="rail rail-sticky">
+        
+        <section class="card brand-card">
+        
+          <img src="assets/mascot/duo.png" alt="共共和页页" width="140" height="140">
+        
+          <p class="small">把资料整理清楚，也把同班的人找到。</p>
+        
+          <a class="link small" href="${href('/find-circles')}">找课程圈</a>
+        
+        </section>
+        
+        ${signCard(ctx)}
+        ${bookmarkBoardCard(ctx)}
+      </aside>
     </div>
-  `;
+  </div>`;
 }
 
 /* ---------- 搜索结果 ---------- */
@@ -133,19 +226,11 @@ export function resourceSearch(ctx) {
   const filters = filterValues(route);
   const result = S.searchResources(db, filters);
   const courses = (db.courses || []).filter((c) => c.id !== 'c_general');
-  const filterOptions = S.resourceFilterOptions(db, filters);
-  const courseIds = new Set(filterOptions.courseIds);
-  if (filters.courseId) courseIds.add(filters.courseId);
-  const filterCourses = courses.filter((course) => courseIds.has(course.id));
-  const includeSelected = (values, selected) => selected && !values.includes(selected)
-    ? [selected, ...values]
-    : values;
-  const schoolOptions = includeSelected(filterOptions.schools, filters.school);
-  const terms = includeSelected(filterOptions.terms, filters.term);
-  const types = includeSelected(filterOptions.types, filters.type);
-  const tags = includeSelected(filterOptions.tags, filters.tag);
-  const advancedFilterCount = [filters.term, filters.type, filters.tag].filter(Boolean).length;
-  const hasActiveFilters = ['q', 'school', 'courseId', 'term', 'type', 'tag'].some((key) => !!filters[key]);
+  const filterCourses = filters.courseId
+    ? courses.filter((c) => c.id === filters.courseId)
+    : courses.slice(0, 80);
+  const tags = S.resourceTags(db);
+  const terms = Array.from(new Set([...TERMS.slice(0, 3), ...S.resourceTerms(db)]));
 
   const sortChips = SORTS.map((sort) => {
     if (sort.key === 'relevance' && !filters.q) return '';
@@ -179,20 +264,18 @@ export function resourceSearch(ctx) {
     ? result.items.map((item) => resourceCard(ctx, item)).join('')
     : emptyState({
       img: 'empty-search.svg',
-      title: hasActiveFilters ? '没有找到相关资料' : '还没有可展示的资料',
-      text: hasActiveFilters
-        ? '换个关键词或调整筛选条件，再试一次。'
-        : '可以发布一份资料，或去课友圈提问。',
-      actions: `${hasActiveFilters
-        ? `<a class="btn btn-ghost btn-sm" href="${href('/resources')}">清除筛选</a>`
-        : `<a class="btn btn-sm" href="${href('/publish')}">发布资料</a>`}
-        <a class="btn btn-ghost btn-sm" href="${href('/find-circles')}">去课友圈问问</a>`
+      mascot: true,
+      title: '没有找到相关讨论或资料',
+      text: '换个关键词，或者只按课程名与学期筛选；也可以清除筛选看看全部。',
+      actions: `<a class="btn btn-ghost btn-sm" href="${href('/resources', { q: filters.q })}">清除筛选</a>
+        
+        <a class="btn btn-sm" href="${href('/find-circles')}">去课友圈问问</a>`
     });
 
   return `
   <div class="container">
     <div class="layout-3">
-      <aside class="rail rail-sticky resource-filter-rail" aria-label="筛选条件">
+      <aside class="rail rail-sticky" aria-label="筛选条件">
         
         <form data-form="filter" class="card card-tight">
         
@@ -210,7 +293,7 @@ export function resourceSearch(ctx) {
         
               <option value="">全部学校</option>
         
-              ${schoolOptions.map((s) => `<option value="${esc(s)}" ${filters.school === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+              ${SCHOOLS.map((s) => `<option value="${esc(s)}" ${filters.school === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         
             </select>
         
@@ -224,15 +307,12 @@ export function resourceSearch(ctx) {
         
               <option value="">全部课程</option>
         
-              ${filterCourses.map((c) => `<option value="${esc(c.id)}" data-school="${esc(filterOptions.courseSchools[c.id] || c.school)}" ${filters.courseId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+              ${filterCourses.map((c) => `<option value="${esc(c.id)}" ${filters.courseId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
         
             </select>
-            ${filterCourses.length > 80 ? '<p class="field-help">课程较多：用上方搜索框直接搜课程名或别名。</p>' : ''}
+            <p class="field-help">课程较多：用上方搜索框直接搜课程名或别名。</p>
         
           </div>
-
-          <details class="filter-advanced" ${advancedFilterCount ? 'open' : ''}>
-            <summary>更多筛选${advancedFilterCount ? `（${advancedFilterCount} 项）` : ''}</summary>
         
           <div class="filter-group">
         
@@ -256,7 +336,7 @@ export function resourceSearch(ctx) {
         
               <option value="">全部类型</option>
         
-              ${types.map((t) => `<option value="${esc(t)}" ${filters.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+              ${RESOURCE_TYPES.map((t) => `<option value="${esc(t)}" ${filters.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
         
             </select>
         
@@ -275,10 +355,8 @@ export function resourceSearch(ctx) {
             </select>
         
           </div>` : ''}
-
-          </details>
         
-          ${hasActiveFilters ? `<a class="link small" href="${href('/resources')}">清除全部筛选</a>` : ''}
+          <a class="link small" href="${href('/resources')}">清除全部筛选</a>
         
         </form>
       </aside>
@@ -335,6 +413,7 @@ export function resourceSearch(ctx) {
         
         </section>
         
+        ${signCard(ctx)}
       </aside>
     </div>
   </div>`;
@@ -398,7 +477,9 @@ export function resourceDetail(ctx) {
   }
 
   const tree = S.commentTree(db, post.id);
-  const previews = resource.previews || [];
+  const previews = ctx.config?.mode === 'production'
+    ? (resource.previews || []).filter((path) => /^\/api\/files\/[A-Za-z0-9_-]+\/preview\/[1-9]\d*$/.test(path))
+    : resource.previews || [];
   const otherCircles = S.suggestedCircles(db, resource).filter((x) => !circle || x.circle.id !== circle.id);
   const joined = me && circle ? S.isActiveMember(db, me.id, circle.id) : false;
 
@@ -437,7 +518,9 @@ export function resourceDetail(ctx) {
       <p class="preview-note">作者在发布时确认公开的前两页预览。游客也能看到这部分内容。</p>`
     : `<div class="notice notice-warn">${icon('image', 'i-sm')}
         
-        <span>静态演示版没有 PDF 渲染服务，这份资料的首页预览无法生成。真实实现中由服务端把前两页转成静态图，绝不会把私有对象地址暴露给游客。</span>
+        <span>${ctx.config?.mode === 'production'
+          ? '预览仍在处理中或暂不可用。这里只展示服务器提供的受控 PNG 预览，不会用示例图片替代真实资料。'
+          : '静态演示版没有 PDF 渲染服务，这份资料的首页预览无法生成。真实实现中由服务端生成前两页预览。'}</span>
       </div>`;
 
   return `
@@ -649,13 +732,11 @@ export function resourcePublish(ctx) {
   }
 
   const myCircles = S.myCircles(db, me.id).filter(({ circle }) => circle.status === 'active');
-  const files = ui.files || [];
+  const production = ctx.config?.mode === 'production';
   const courseList = (db.courses || [])
     .filter((c) => c.id !== 'c_general')
     .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
-  const sampleOptions = DEMO_SAMPLE_FILES
-    .map((file, index) => `<option value="${index}">${esc(file.label)}</option>`)
-    .join('');
+  // 示例附件只由 pdfUploadField 在本地演示模式展示。
 
   // 从课程页上传时预填课程；有草稿时先把草稿读回来（草稿允许没有课程）
   const draft = (db.drafts && db.drafts[me.id]) || null;
@@ -675,23 +756,7 @@ export function resourcePublish(ctx) {
   };
   const initialCourseName = (S.courseOf(db, initialCourseId) || {}).name || '';
 
-  const fileRows = files.length
-    ? files.map((file, index) => `
-      <div class="attachment">
-        
-        <img src="assets/art/file-pdf.svg" alt="PDF" width="34" height="40">
-        
-        <div class="grow">
-        
-          <div class="file-name">${esc(file.name)}</div>
-        
-          <div class="file-meta">PDF · ${file.pages} 页 · ${formatBytes(file.sizeBytes)} · v1 · 演示文件</div>
-        
-        </div>
-        
-        <button class="btn btn-quiet btn-sm" type="button" data-action="remove-file" data-index="${index}">移除</button>
-      </div>`).join('')
-    : '<p class="field-help">还没有添加附件。至少需要 1 个 PDF。</p>';
+  const uploadHtml = pdfUploadField(ctx, { required: true, samples: DEMO_SAMPLE_FILES });
 
   return `
   <div class="layout-1">
@@ -754,7 +819,7 @@ export function resourcePublish(ctx) {
         
             <select class="select" id="res-school" name="school" required>
         
-              ${SCHOOLS.map((s) => `<option value="${esc(s)}" ${(initial.school || SCHOOLS[0]) === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+              ${(production ? ['浙江大学'] : SCHOOLS).map((s) => `<option value="${esc(s)}" ${(initial.school || SCHOOLS[0]) === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         
             </select>
         
@@ -797,27 +862,12 @@ export function resourcePublish(ctx) {
         </div>
 
         
-        <div class="field">
-        
-          <label>PDF 附件 <span class="label-hint">1–3 个 · 扫描通过后才进入索引</span></label>
-        
-          <div class="row wrap">
-        
-            <select class="select" data-file-picker style="max-width:340px">
-        
-              ${sampleOptions}
-        
-            </select>
-        
-            <button class="btn btn-ghost btn-sm" type="button" data-action="add-file">添加附件</button>
-        
-          </div>
-        
-          ${fileRows}
-        
-          <p class="field-help">静态演示版没有上传服务：这里使用包内明确标注的示例 PDF，下载会得到示例文件。真实环境由服务端签发上传地址、验证真实 MIME 与大小并扫描。</p>
-        
-        </div>
+        ${sourceRightsFields({ source: draftResource.source, rights: draftResource.rights })}
+        <label class="checkbox mb-3">
+          <input type="checkbox" name="original" required>
+          <span><b>文档来源</b>：我确认资料来源合法且有权分享，不含他人隐私或整本商业教材扫描件。请先勾选，再上传 PDF。</span>
+        </label>
+        ${uploadHtml}
 
         
         <hr>
@@ -880,13 +930,7 @@ export function resourcePublish(ctx) {
         
         </label>
         
-        <label class="checkbox mt-2">
-        
-          <input type="checkbox" name="original" required>
-        
-          <span><b>文档来源</b>：我确认这份资料不是整本商业教材的扫描件，不含他人隐私信息，且我有权分享。未勾选无法上传。</span>
-        
-        </label>
+        <p class="field-help">发布前请再次核对上方来源与授权说明。</p>
 
         
         <div class="row mt-6 wrap">
@@ -897,7 +941,7 @@ export function resourcePublish(ctx) {
         
           <button class="btn btn-ghost" type="button" data-action="save-resource-draft">保存草稿</button>
           <button class="btn btn-ghost" type="button" data-action="apply-course">申请补充课程</button>
-          <button class="btn" type="submit">${icon('upload', 'i-sm')}发布资料</button>
+          <button class="btn" type="submit" ${ui.uploading || ui.publishing ? 'disabled' : ''}>${icon('upload', 'i-sm')}${ui.uploading ? '附件检查中…' : ui.publishing ? '发布中…' : '发布资料'}</button>
         
         </div>
         ${draft ? `<p class="field-help">已读取 ${esc(timeAgo(draft.updatedAt))} 保存的草稿；正式发布前可以继续修改。</p>` : ''}

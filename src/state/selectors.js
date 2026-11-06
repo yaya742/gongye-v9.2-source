@@ -1,6 +1,6 @@
 /* 只读查询层：页面从数据库对象派生视图，不在这里修改数据 */
 
-import { shanghaiDate, weekStart, stripMarkdown, levelOf } from '../lib/format.js';
+import { shanghaiDate, weekStart, stripMarkdown, levelOf, truncate } from '../lib/format.js';
 import { COURSE_ALIASES } from '../data/course-aliases.js';
 
 export const byId = (list, id) => (list || []).find((item) => item.id === id) || null;
@@ -87,6 +87,8 @@ export function commentTree(db, postId) {
 }
 
 export function commentCount(db, postId) {
+  const count = db.postCounts && db.postCounts[postId] && db.postCounts[postId].comments;
+  if (Number.isFinite(count)) return count;
   return commentsOf(db, postId).length;
 }
 
@@ -101,10 +103,14 @@ export function reactionOf(db, userId, postId, kind) {
 }
 
 export function reactionCount(db, postId, kind) {
+  const count = db.postCounts && db.postCounts[postId] && db.postCounts[postId][kind];
+  if (Number.isFinite(count)) return count;
   return (db.reactions || []).filter((r) => r.postId === postId && r.kind === kind).length;
 }
 
 export function giftedQtyForPost(db, postId) {
+  const count = db.postCounts && db.postCounts[postId] && db.postCounts[postId].giftQty;
+  if (Number.isFinite(count)) return count;
   return (db.gifts || [])
     .filter((g) => g.postId === postId && g.status === 'active')
     .reduce((sum, g) => sum + g.qty, 0);
@@ -117,6 +123,8 @@ export function giftedByMe(db, userId, postId) {
 }
 
 export function receivedGiftTotal(db, userId) {
+  const count = db.userStats && db.userStats[userId] && db.userStats[userId].receivedGiftQty;
+  if (Number.isFinite(count)) return count;
   return (db.gifts || [])
     .filter((g) => g.receiverId === userId && g.status === 'active')
     .reduce((sum, g) => sum + g.qty, 0);
@@ -126,6 +134,25 @@ export function receivedGiftTotal(db, userId) {
 
 export function membership(db, userId, circleId) {
   return (db.memberships || []).find((m) => m.userId === userId && m.circleId === circleId) || null;
+}
+
+/** 圈内禁言：管理员设置，可以带截止时间；过期后自动恢复 */
+export function isWriteRestricted(membershipRow, now = Date.now()) {
+  if (!membershipRow) return false;
+  // v10 兼容：管理员禁言（无期限）仍写在 moderationMuted 上
+  if (membershipRow.moderationMuted) return true;
+  if (!membershipRow.writeRestricted) return false;
+  return !membershipRow.restrictedUntil || new Date(membershipRow.restrictedUntil).getTime() > now;
+}
+
+/** blockerId 是否拉黑了 blockedId */
+export function blockedBy(db, blockerId, blockedId) {
+  return (db.blocks || []).some((row) => row.blockerId === blockerId && row.blockedId === blockedId);
+}
+
+/** 任一方拉黑对方，两人之间就不能互发私信 */
+export function eitherBlocked(db, a, b) {
+  return blockedBy(db, a, b) || blockedBy(db, b, a);
 }
 
 export function isActiveMember(db, userId, circleId) {
@@ -147,7 +174,7 @@ export function courseCircles(db, courseId, status = null) {
 }
 
 /** 某用户能否在圈内写入（发帖/评论） */
-export function circleWriteBlock(db, userId, circleId) {
+export function circleWriteBlock(db, userId, circleId, now = Date.now()) {
   const circle = circleOf(db, circleId);
   if (!circle) return { ok: false, code: 'circle_missing', message: '课友圈不存在' };
   if (circle.status === 'archived') {
@@ -161,13 +188,18 @@ export function circleWriteBlock(db, userId, circleId) {
   if (!m || m.status !== 'active') {
     return { ok: false, code: 'not_member', message: '发布到这个圈需要先确认加入' };
   }
-  if (m.muted) return { ok: false, code: 'muted', message: '你在这个圈被禁言，不能写入内容' };
-  if (m.writeRestricted) return { ok: false, code: 'restricted', message: '你在这个圈的写入权限被临时限制' };
+  if (isWriteRestricted(m, now)) return { ok: false, code: 'restricted', message: restrictionMessage(m) };
   return { ok: true };
 }
 
+function restrictionMessage(m) {
+  return m.restrictedUntil
+    ? `你在这个圈被禁言到 ${String(m.restrictedUntil).slice(0, 10)}，暂时不能发帖和评论`
+    : '你在这个圈被禁言，暂时不能发帖和评论';
+}
+
 /** 资料原帖的讨论：非成员登录后也可纠错，但禁言与归档仍然生效 */
-export function resourceCommentBlock(db, userId, post) {
+export function resourceCommentBlock(db, userId, post, now = Date.now()) {
   const user = userOf(db, userId);
   if (!user || user.status !== 'active') {
     return { ok: false, code: 'suspended', message: '账号已停用，不能评论' };
@@ -179,9 +211,8 @@ export function resourceCommentBlock(db, userId, post) {
     return { ok: false, code: 'archived', message: '来源圈已归档，只能阅读历史讨论' };
   }
   const m = membership(db, userId, post.circleId);
-  if (m && m.muted) return { ok: false, code: 'muted', message: '你在这个圈被禁言，不能借资料入口评论' };
-  if (m && m.writeRestricted) {
-    return { ok: false, code: 'restricted', message: '你在这个圈的写入权限被临时限制' };
+  if (isWriteRestricted(m, now)) {
+    return { ok: false, code: 'restricted', message: restrictionMessage(m) };
   }
   return { ok: true };
 }
@@ -253,7 +284,7 @@ export function resolveCourseQuery(db, query, explicitCourseId = '') {
     const loose = courses.filter((course) => compactText(course.name).includes(canonical));
     const exact = loose.filter((course) => compactText(course.name) === canonical);
     let list = exact.length ? exact : loose;
-    // 同名/近名课程很多（例如课程目录里多门「线性代数」）：优先已有资料的课程，避免别名一搜就歧义
+    // 同名/近名课程很多（例如浙大目录里多门「线性代数」）：优先已有资料的课程，避免别名一搜就歧义
     if (list.length > 1) {
       const withContent = list.filter((course) => (db.resources || []).some((resource) => resource.courseId === course.id));
       if (withContent.length === 1) list = withContent;
@@ -374,7 +405,7 @@ export function searchResources(db, filters = {}, now = Date.now()) {
       return { resource, post, course, author, files };
     });
 
-  if (school) list = list.filter((x) => (x.resource.school || x.course?.school) === school);
+  if (school) list = list.filter((x) => x.resource.school === school);
   if (courseId) list = list.filter((x) => x.resource.courseId === courseId);
   if (term) list = list.filter((x) => x.resource.term === term);
   if (type) list = list.filter((x) => x.resource.type === type);
@@ -446,44 +477,6 @@ export function searchResources(db, filters = {}, now = Date.now()) {
   };
 }
 
-/**
- * 按当前筛选条件为每个字段计算可选值。
- * 计算某个字段时会暂时移除它自身的条件，避免已选值把同字段选项锁死；
- * 其余条件共同收窄候选资料，形成学校、课程、学期、类型与标签之间的包含关系。
- */
-export function resourceFilterOptions(db, filters = {}) {
-  const rowsFor = (field) => {
-    const result = searchResources(db, { ...filters, [field]: '', sort: 'recent' });
-    const rows = [...result.items, ...(result.courseOnly || [])];
-    const seen = new Set();
-    return rows.filter(({ resource }) => {
-      if (seen.has(resource.id)) return false;
-      seen.add(resource.id);
-      return true;
-    });
-  };
-  const valuesFor = (field, project) => Array.from(new Set(
-    rowsFor(field).flatMap((row) => project(row) || []).filter(Boolean)
-  ));
-  const courseRows = rowsFor('courseId');
-  const courseSchools = {};
-  courseRows.forEach(({ resource, course }) => {
-    if (resource.courseId && !courseSchools[resource.courseId]) {
-      courseSchools[resource.courseId] = resource.school || course?.school || '';
-    }
-  });
-
-  return {
-    schools: valuesFor('school', ({ resource, course }) => [resource.school || course?.school]),
-    courseIds: Array.from(new Set(courseRows.map(({ resource }) => resource.courseId)))
-      .filter((id) => id && id !== 'c_general'),
-    courseSchools,
-    terms: valuesFor('term', ({ resource }) => [resource.term]),
-    types: valuesFor('type', ({ resource }) => [resource.type]),
-    tags: valuesFor('tag', ({ post }) => post.tags || [])
-  };
-}
-
 /** 剩余意图评分（9.1 规则）：标题短语 60 + 标题覆盖 40 + 章节/类型 20 + 摘要 10 */
 function intentScore(item, needle) {
   const compactNeedle = compactText(needle);
@@ -506,14 +499,12 @@ function intentScore(item, needle) {
 }
 
 export function resourceTerms(db) {
-  return Array.from(new Set((db.resources || [])
-    .filter((resource) => resourceEligibility(db, resource).ok)
-    .map((resource) => resource.term))).filter(Boolean);
+  return Array.from(new Set((db.resources || []).map((r) => r.term))).filter(Boolean);
 }
 
 export function resourceTags(db) {
   const set = new Set();
-  (db.resources || []).filter((resource) => resourceEligibility(db, resource).ok).forEach((r) => {
+  (db.resources || []).forEach((r) => {
     const post = postOf(db, r.postId);
     (post && post.tags ? post.tags : []).forEach((t) => set.add(t));
   });
@@ -529,17 +520,22 @@ export function suggestedCircles(db, resource) {
 }
 
 export function countMembers(db, circleId) {
+  const count = db.memberCounts && db.memberCounts[circleId];
+  if (Number.isFinite(count)) return count;
+  const circle = circleOf(db, circleId);
+  if (circle && Number.isFinite(circle.memberCount)) return circle.memberCount;
   return (db.memberships || []).filter((m) => m.circleId === circleId && m.status === 'active').length;
 }
 
 /* ---------- 信息流 ---------- */
 
 export function feedPosts(db, options = {}, now = Date.now()) {
-  const { meId = null, mode = 'all', circleId = null, board = null, week = false, sort = 'latest', limit = 20, offset = 0 } = options;
+  const { meId = null, mode = 'all', circleId = null, board = null, week = false, term = '', sort = 'latest', limit = 20, offset = 0 } = options;
   let posts = (db.posts || []).filter((p) => p.status === 'published');
 
   if (circleId) posts = posts.filter((p) => p.circleId === circleId);
   if (board) posts = posts.filter((p) => p.board === board);
+  if (term) posts = posts.filter((p) => (p.term || (resourceForPost(db, p.id) || {}).term) === term);
   if (week) {
     const start = weekStart(now);
     posts = posts.filter((p) => new Date(p.contentUpdatedAt || p.publishedAt).getTime() >= start);
@@ -573,8 +569,9 @@ export function feedPosts(db, options = {}, now = Date.now()) {
 export function hotScore(db, post, now = Date.now()) {
   const likes = reactionCount(db, post.id, 'like');
   const saves = reactionCount(db, post.id, 'save');
-  const commenters = new Set(commentsOf(db, post.id).map((c) => c.authorId)).size;
-  const gifters = new Set(
+  const summary = (db.postCounts && db.postCounts[post.id]) || {};
+  const commenters = Number.isFinite(summary.commenters) ? summary.commenters : new Set(commentsOf(db, post.id).map((c) => c.authorId)).size;
+  const gifters = Number.isFinite(summary.gifters) ? summary.gifters : new Set(
     (db.gifts || []).filter((g) => g.postId === post.id && g.status === 'active').map((g) => g.senderId)
   ).size;
   const hours = Math.max(0, (now - new Date(post.publishedAt).getTime()) / 3600000);
@@ -595,10 +592,14 @@ export function postsByAuthor(db, userId) {
 }
 
 export function followerCount(db, userId) {
+  const count = db.userStats && db.userStats[userId] && db.userStats[userId].followers;
+  if (Number.isFinite(count)) return count;
   return (db.follows || []).filter((f) => f.targetType === 'user' && f.targetId === userId).length;
 }
 
 export function followingCount(db, userId) {
+  const count = db.userStats && db.userStats[userId] && db.userStats[userId].following;
+  if (Number.isFinite(count)) return count;
   return (db.follows || []).filter((f) => f.followerId === userId).length;
 }
 
@@ -611,6 +612,8 @@ export function isFollowing(db, followerId, targetType, targetId) {
 /* ---------- 成长 ---------- */
 
 export function xpOf(db, userId) {
+  const count = db.userStats && db.userStats[userId] && db.userStats[userId].xp;
+  if (Number.isFinite(count)) return count;
   return (db.xp || []).filter((x) => x.userId === userId).reduce((sum, x) => sum + x.delta, 0);
 }
 
@@ -710,6 +713,10 @@ export function openReports(db) {
 }
 
 export function reportTargetLabel(db, report) {
+  if (report.targetType === 'dm') {
+    const peer = userOf(db, report.targetId);
+    return `${peer ? peer.nickname : '已注销用户'} 发来的私信（${(report.evidence || []).length} 条）`;
+  }
   if (report.targetType === 'post') {
     const post = postOf(db, report.targetId);
     return post ? (post.title || stripMarkdown(post.body).slice(0, 24)) : '已删除的帖子';
@@ -835,5 +842,37 @@ export function bookmarkBoard(db, { date = shanghaiDate(new Date()), limit = 5 }
     .filter((row) => row.post)
     .sort((a, b) => b.count - a.count || String(a.post.title || '').localeCompare(String(b.post.title || ''), 'zh'))
     .slice(0, Math.max(1, limit));
+}
+
+/* ---------- 个人数据导出 ---------- */
+
+/** 一个账号能查阅的全部个人数据：资料、发布内容、互动、私信、通知、页签与成长记录 */
+export function personalData(db, userId, now = Date.now()) {
+  const user = userOf(db, userId);
+  if (!user) return null;
+  const mine = (rows, key = 'userId') => (rows || []).filter((row) => row[key] === userId);
+  return {
+    exportedAt: new Date(now).toISOString(),
+    profile: {
+      id: user.id, email: user.email, nickname: user.nickname, avatar: user.avatar, bio: user.bio,
+      role: user.role, status: user.status, joinedAt: user.joinedAt
+    },
+    posts: mine(db.posts, 'authorId'),
+    comments: mine(db.comments, 'authorId'),
+    reactions: mine(db.reactions),
+    follows: mine(db.follows, 'followerId'),
+    memberships: mine(db.memberships),
+    directMessages: (db.directMessages || []).filter((row) => row.senderId === userId || row.recipientId === userId),
+    notifications: mine(db.notifications),
+    blocks: mine(db.blocks, 'blockerId'),
+    reportsFiled: mine(db.reports, 'reporterId').map(({ evidence, ...row }) => row),
+    applications: mine(db.applications, 'applicantId'),
+    giftsSent: mine(db.gifts, 'senderId'),
+    giftsReceived: mine(db.gifts, 'receiverId'),
+    ledger: mine(db.ledger),
+    xp: mine(db.xp),
+    prefs: (db.prefs && db.prefs[userId]) || {},
+    drafts: (db.drafts && db.drafts[userId]) || null
+  };
 }
 

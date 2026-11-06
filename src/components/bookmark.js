@@ -71,7 +71,8 @@ export function signCard(ctx) {
   if (!me) {
     return `<section class="card sign-card bookmark-card">
       ${sheet}
-      <a class="btn btn-sm" href="${href('/login', { next: '/me/wallet' })}">登录后查看页签余额</a>
+      <div class="bookmark-balance"><b>—</b><span>枚可赠页签</span></div>
+      <a class="btn btn-sm" href="${href('/login', { next: '/me/wallet' })}">登录后查看</a>
       <small class="tiny muted">每日 1 枚 · 可存 30 枚 · 无连续签到要求</small>
     </section>`;
   }

@@ -10,12 +10,16 @@
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { promises as fsp, existsSync, lstatSync, readFileSync, mkdirSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createSeed } from '../src/data/seed.js';
 import { removeKnownDemoPosts, DEMO_POST_CLEANUP_VERSION } from '../src/data/demo-post-cleanup.js';
 import * as A from '../src/state/actions.js';
+import * as S from '../src/state/selectors.js';
+import { createFileStore, decodeFileName, FileError } from './files-pilot.mjs';
+import { scannerFromEnv } from './scanner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(HERE, '..');
@@ -63,7 +67,8 @@ const WRITE_ACTIONS = new Set([
   'claimDaily', 'sendGift', 'markNotificationRead', 'markAllNotificationsRead',
   'sendDirectMessage', 'markDirectMessagesRead',
   'reportContent', 'resolveReport', 'archiveCircle', 'setUserStatus',
-  'createCircle', 'setPostStatus', 'recordEvent'
+  'createCircle', 'setPostStatus', 'setCirclePin', 'resolveApplication', 'recordEvent',
+  'setBlock', 'setMemberRestriction', 'deleteAccount'
 ]);
 const PUBLIC_ACTIONS = new Set(['requestCode', 'verifyCode', 'cloudSignIn', 'recordEvent']);
 
@@ -126,19 +131,54 @@ function isSupportedDemoAttachmentPath(value) {
   return typeof value === 'string' && DEMO_ATTACHMENT_PATHS.has(value);
 }
 
-function validatePilotCreatePostAttachments(payload) {
+const UPLOAD_PATH_PREFIX = 'upload:';
+const uploadIdOf = (value) => (typeof value === 'string' && value.startsWith(UPLOAD_PATH_PREFIX)
+  ? value.slice(UPLOAD_PATH_PREFIX.length) : null);
+
+/** 把发帖请求里的文件换成服务端记录：名称、大小都以上传时校验的结果为准，不信任客户端 */
+function resolvePostFiles(db, payload, me) {
   const attachments = payload.attachments || [];
-  if (!Array.isArray(attachments)) return '附件数据格式无效';
+  const images = payload.images || [];
+  if (!Array.isArray(attachments) || !Array.isArray(images)) return { error: '附件数据格式无效' };
+  const uploads = [];
+  const claim = (id, kind) => {
+    const upload = (db.uploads || []).find((row) => row.id === id);
+    if (!upload || upload.ownerId !== me.id || upload.kind !== kind || upload.postId || uploads.includes(upload)) return null;
+    uploads.push(upload);
+    return upload;
+  };
+
+  const resolvedAttachments = [];
   // Keep the established action response for this existing validation.
-  if (attachments.length > 3) return '';
-  for (const attachment of attachments) {
-    if (!attachment || typeof attachment !== 'object' || Array.isArray(attachment)) return '附件数据格式无效';
-    if (!isSupportedDemoAttachmentPath(attachment.path)) {
-      return '当前试用版只支持内置演示 PDF，暂不支持上传自选文件';
+  if (attachments.length <= 3) {
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment !== 'object' || Array.isArray(attachment)) return { error: '附件数据格式无效' };
+      if (attachment.uploadId) {
+        const upload = claim(String(attachment.uploadId), 'pdf');
+        if (!upload) return { error: '这个文件已失效，请重新上传' };
+        resolvedAttachments.push({
+          name: upload.name, sizeBytes: upload.sizeBytes, pages: upload.pages,
+          path: `${UPLOAD_PATH_PREFIX}${upload.id}`, status: 'ready', demo: false
+        });
+      } else if (!isSupportedDemoAttachmentPath(attachment.path)) {
+        return { error: '请先上传 PDF 文件' };
+      } else if (attachment.status === 'processing') {
+        return { error: '文件还在处理中，请稍后再发布' };
+      } else {
+        resolvedAttachments.push(attachment);
+      }
     }
-    if (attachment.status === 'processing') return '当前试用版不支持真实文件处理';
+  } else {
+    resolvedAttachments.push(...attachments);
   }
-  return '';
+
+  const resolvedImages = [];
+  for (const image of images.slice(0, 9)) {
+    const upload = claim(uploadIdOf(image), 'image');
+    if (!upload) return { error: '图片已失效，请重新添加' };
+    resolvedImages.push(`/api/files/${upload.id}`);
+  }
+  return { attachments: resolvedAttachments, images: resolvedImages, uploads };
 }
 
 /* ---------- 白名单 ---------- */
@@ -209,7 +249,7 @@ export class JsonStore {
         return this.data;
       }
     }
-    this.data = createSeed(Date.now());
+    this.data = createSeed(Date.now(), { keepDemoPosts: false });
     this.data.sessions = [];
     this.data.pilot = { createdAt: new Date().toISOString() };
     await this.save();
@@ -433,7 +473,7 @@ function sanitizePublicEvent(payload, db) {
   return null;
 }
 
-export function publicState(db, meId) {
+export function publicState(db, meId, system = null) {
   const me = meId ? db.users.find((u) => u.id === meId) : null;
   const isAdmin = me && me.role === 'admin';
   const circles = db.circles || [];
@@ -452,15 +492,22 @@ export function publicState(db, meId) {
       ]),
       // File paths can contain private storage keys. The client only needs a
       // truthy marker for ready-file eligibility; downloads resolve by ID on the server.
-      path: isSupportedDemoAttachmentPath(attachment.path) ? 'available' : null
+      path: isSupportedDemoAttachmentPath(attachment.path) || uploadIdOf(attachment.path) ? 'available' : null
     }));
   const resources = (db.resources || []).filter((resource) => postIds.has(resource.postId)
     && (resource.indexEnabled !== false || (posts.find((post) => post.id === resource.postId) || {}).authorId === meId));
-  const activeOtherMemberships = (db.memberships || [])
-    .filter((row) => row.userId === meId || row.status === 'active')
-    .map((row) => row.userId === meId
-      ? pickFields(row, ['userId', 'circleId', 'status', 'muted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted'])
-      : { circleId: row.circleId, status: 'active' });
+  // 成员名单不公开；管理员需要名单来做圈内禁言和移出
+  const activeOtherMemberships = !meId
+    ? []
+    : isAdmin
+    ? (db.memberships || []).map((row) => pickFields(row, [
+      'userId', 'circleId', 'status', 'muted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted', 'restrictedUntil'
+    ]))
+    : (db.memberships || [])
+      .filter((row) => row.userId === meId || row.status === 'active')
+      .map((row) => row.userId === meId
+        ? pickFields(row, ['userId', 'circleId', 'status', 'muted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted', 'restrictedUntil'])
+        : { circleId: row.circleId, status: 'active' });
   const reactions = (db.reactions || []).filter((row) => postIds.has(row.postId)).map((row) => ({
     postId: row.postId,
     kind: row.kind,
@@ -507,14 +554,17 @@ export function publicState(db, meId) {
       email: user.id === meId ? user.email : '',
       verified: user.id === meId && user.verified === true
     })),
-    courses: (db.courses || []).map((course) => pickFields(course, ['id', 'school', 'name', 'code', 'category'])),
-    circles: (db.circles || []).map((circle) => pickFields(circle, [
-      'id', 'courseId', 'status', 'createdBy', 'inviteCode', 'createdAt', 'pinnedPostId'
-    ])),
+    courses: (db.courses || []).map((course) => pickFields(course, ['id', 'school', 'name'])),
+    circles: (db.circles || [])
+      .filter((circle) => (db.memberships || []).some((m) => m.userId === meId && m.circleId === circle.id && m.status === 'active')
+        || posts.some((post) => post.circleId === circle.id))
+      .map((circle) => pickFields(circle, [
+        'id', 'courseId', 'status', 'createdBy', 'inviteCode', 'createdAt', 'pinnedPostId'
+      ])),
     circleInviteAliases: (db.circleInviteAliases || [])
       .filter((alias) => {
         if (!alias || typeof alias.code !== 'string' || !alias.code || typeof alias.circleId !== 'string') return false;
-        const target = circles.find((circle) => circle.id === alias.circleId);
+        const target = (db.circles || []).find((circle) => circle.id === alias.circleId);
         return Boolean(target && canonicalIds.get(target.courseId) === target.id);
       })
       .map((alias) => pickFields(alias, ['code', 'circleId'])),
@@ -546,8 +596,13 @@ export function publicState(db, meId) {
     directMessages: meId
       ? (db.directMessages || [])
         .filter((row) => row.senderId === meId || row.recipientId === meId)
-        .map((row) => pickFields(row, ['id', 'senderId', 'recipientId', 'body', 'createdAt', 'readAt']))
+        .map((row) => ({
+          ...pickFields(row, ['id', 'senderId', 'recipientId', 'createdAt', 'readAt', 'status']),
+          body: row.status === 'removed' ? '' : row.body
+        }))
       : [],
+    blocks: meId ? (db.blocks || []).filter((row) => row.blockerId === meId) : [],
+    ...(isAdmin && system ? { system } : {}),
     reports: isAdmin ? db.reports || [] : [],
     audit: isAdmin ? db.audit || [] : [],
     applications: isAdmin ? db.applications || [] : [],
@@ -561,11 +616,16 @@ export function publicState(db, meId) {
 /* ---------- HTTP 工具 ---------- */
 
 function sendJson(res, status, payload, extraHeaders = {}) {
-  const body = JSON.stringify(payload);
+  const text = JSON.stringify(payload);
+  // 整站状态随内容增长，文本压缩后通常只有原来的两三成
+  const acceptsGzip = /\bgzip\b/.test(String((res.req && res.req.headers['accept-encoding']) || ''));
+  const compress = acceptsGzip && text.length > 2048;
+  const body = compress ? gzipSync(text) : text;
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'content-length': Buffer.byteLength(body),
+    ...(compress ? { 'content-encoding': 'gzip', vary: 'Accept-Encoding, Origin' } : {}),
     ...extraHeaders
   });
   res.end(body);
@@ -609,6 +669,10 @@ const clearCookieHeader = (secure) => {
 
 /* ---------- 静态文件 ---------- */
 
+/* 静态服务只放开站点本身：源码、测试、部署配置不对外 */
+const PRIVATE_TOP = new Set(['server', 'tests', 'scripts', 'node_modules', 'deploy', 'migration']);
+const PRIVATE_FILES = new Set(['package.json', 'package-lock.json', 'compose.yaml', 'dockerfile', '.dockerignore', 'nginx.conf.example', 'source_manifest.txt', 'delivery_status.md']);
+
 function isPrivateStaticPath(urlPath) {
   let decoded;
   try {
@@ -617,7 +681,9 @@ function isPrivateStaticPath(urlPath) {
     return true;
   }
   const segments = path.posix.normalize(decoded).split('/').filter(Boolean);
-  return segments.some((segment) => segment.toLowerCase() === 'server' || segment.startsWith('.'));
+  if (segments.some((segment) => segment.startsWith('.'))) return true;
+  if (segments.some((segment) => PRIVATE_TOP.has(segment.toLowerCase()))) return true;
+  return segments.length === 1 && PRIVATE_FILES.has(segments[0].toLowerCase());
 }
 
 async function resolveStatic(urlPath) {
@@ -656,12 +722,26 @@ function runtimeConfigScript(options) {
     basePath: '/',
     authMode: options.authMode || 'demo-code',
     cloud: options.cloud || null,
+    legal: options.legal || null,
     demoNotice: options.notice
   };
   return `window.__GONGYE_CONFIG__ = ${JSON.stringify(config)};\n`;
 }
 
 /* ---------- 创建服务 ---------- */
+
+const HOUR_MS = 3600 * 1000;
+const KEEP_SNAPSHOTS = 48;
+
+/** 每小时留一份数据快照，保留最近 48 份，误操作或写坏时可以退回 */
+async function snapshotData(dataFile, body) {
+  const dir = path.join(path.dirname(dataFile), 'backups');
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  await fsp.writeFile(path.join(dir, `db-${stamp}.json`), body, { mode: 0o600 });
+  const names = (await fsp.readdir(dir)).filter((name) => name.startsWith('db-')).sort();
+  await Promise.all(names.slice(0, -KEEP_SNAPSHOTS).map((name) => fsp.unlink(path.join(dir, name)).catch(() => {})));
+}
 
 export async function createPilotServer(options = {}) {
   const dataFile = options.dataFile || path.join(HERE, 'data', 'db.json');
@@ -711,6 +791,20 @@ export async function createPilotServer(options = {}) {
 
   const store = new JsonStore(dataFile);
   const db = await store.load();
+  if (!Array.isArray(db.uploads)) db.uploads = [];
+
+  const scanner = options.scanner !== undefined ? options.scanner : scannerFromEnv();
+  const files = createFileStore({
+    dir: options.filesDir || path.join(path.dirname(dataFile), 'files'),
+    limits: options.limits,
+    previews: options.previews !== false,
+    scanner
+  });
+  const systemInfo = { scan: scanner ? scanner.describe : null };
+  const stateFor = (meId) => publicState(db, meId, systemInfo);
+  const trustProxy = options.trustProxy === undefined
+    ? String(process.env.TRUST_PROXY || '') === '1'
+    : !!options.trustProxy;
 
   for (const email of adminEmails) {
     const admin = db.users.find((u) => String(u.email || '').toLowerCase() === email);
@@ -730,10 +824,95 @@ export async function createPilotServer(options = {}) {
     return bucket.count <= limit;
   };
 
+  const sweepFiles = () => files.sweep(db).then((count) => {
+    if (count) return store.save();
+    return undefined;
+  }).catch((error) => console.error('[pilot] 清理文件失败', error));
+  await sweepFiles();
+  const hourly = setInterval(() => {
+    sweepFiles();
+    snapshotData(dataFile, JSON.stringify(store.sanitizeForDisk(db)))
+      .catch((error) => console.error('[pilot] 数据快照失败', error));
+  }, HOUR_MS);
+  hourly.unref();
+
+  /* 上传：只接受已登录且邮箱已验证的账号，文件先按内容校验再入库 */
+  async function handleUpload(req, res, origin) {
+    if (origin && !originAllowed(origin, req)) {
+      sendJson(res, 403, { error: { code: 'origin', message: '来源不被允许' } });
+      return;
+    }
+    if (req.headers['x-requested-with'] !== 'gongye') {
+      sendJson(res, 403, { error: { code: 'bad_request', message: '请求来源不正确' } });
+      return;
+    }
+    const me = userFromRequest(db, req);
+    if (!me) {
+      sendJson(res, 401, { error: { code: 'login', message: '请先登录' } });
+      return;
+    }
+    if (me.status !== 'active' || !me.verified) {
+      sendJson(res, 403, { error: { code: 'unverified', message: '账号状态不允许上传' } });
+      return;
+    }
+    const kind = new URL(req.url, 'http://local').searchParams.get('kind');
+    if (!['pdf', 'image'].includes(kind)) {
+      sendJson(res, 400, { error: { code: 'bad_kind', message: '不支持的文件类型' } });
+      return;
+    }
+    if (!allowRequest(`upload:${me.id}`, files.limit.uploadsPerHour, HOUR_MS)) {
+      sendJson(res, 429, { error: { code: 'rate_limited', message: '上传太频繁，请稍后再试' } });
+      return;
+    }
+    files.assertQuota(db.uploads, me.id);
+    const upload = await files.receive(req, {
+      kind, ownerId: me.id, name: decodeFileName(req.headers['x-file-name'])
+    });
+    db.uploads.push(upload);
+    await store.save();
+    sendJson(res, 201, {
+      file: {
+        id: upload.id, kind: upload.kind, name: upload.name, sizeBytes: upload.sizeBytes,
+        pages: upload.pages, previewCount: upload.previewCount
+      }
+    });
+  }
+
+  /* 下载与展示：链接里只有随机 ID，能不能看每次都按帖子和账号状态重新判断 */
+  async function handleFile(req, res, id, previewPage) {
+    const upload = db.uploads.find((row) => row.id === id);
+    if (!upload) throw new FileError(404, 'not_found', '文件不存在');
+    const me = userFromRequest(db, req);
+    const staff = !!me && me.status === 'active' && (me.role === 'admin' || me.id === upload.ownerId);
+    const post = upload.postId ? S.postOf(db, upload.postId) : null;
+    const visible = S.isVisiblePost(post);
+
+    if (previewPage) {
+      const resource = post ? S.resourceForPost(db, post.id) : null;
+      if (!staff && !S.resourceEligibility(db, resource).ok) throw new FileError(404, 'not_found', '文件不存在');
+      if (previewPage > upload.previewCount) throw new FileError(404, 'not_found', '文件不存在');
+      await files.sendPreview(req, res, upload, previewPage);
+      return;
+    }
+    if (upload.kind === 'image') {
+      if (!visible && !staff) throw new FileError(404, 'not_found', '文件不存在');
+      await files.sendFile(req, res, upload, { cache: visible ? 'public, max-age=600' : 'no-store' });
+      return;
+    }
+
+    if (!me) throw new FileError(401, 'login', '登录后才能下载');
+    if (!me.verified || me.status !== 'active') throw new FileError(403, 'forbidden', '账号状态不允许下载');
+    const attachment = (db.attachments || []).find((row) => row.path === `${UPLOAD_PATH_PREFIX}${upload.id}`);
+    const usable = visible && attachment && attachment.status === 'ready' && !attachment.downloadBlocked;
+    if (!usable && !staff) throw new FileError(404, 'not_found', '文件不存在');
+    await files.sendFile(req, res, upload, { download: true });
+  }
+
   const server = http.createServer(async (req, res) => {
     const urlPath = (req.url || '/').split('?')[0];
     const origin = req.headers.origin;
-    const ip = req.socket.remoteAddress || 'unknown';
+    const ip = (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim())
+      || req.socket.remoteAddress || 'unknown';
 
     /* ---- 跨域头：允许静态站（不同域名）调用接口 ---- */
     if (origin && originAllowed(origin, req)) {
@@ -745,7 +924,7 @@ export async function createPilotServer(options = {}) {
     if (req.method === 'OPTIONS') {
       if (origin && originAllowed(origin, req)) {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization, x-requested-with');
+        res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization, x-requested-with, x-file-name');
         res.setHeader('Access-Control-Max-Age', '600');
       }
       res.writeHead(204);
@@ -754,6 +933,17 @@ export async function createPilotServer(options = {}) {
     }
 
     try {
+      /* ---- 文件 ---- */
+      if (urlPath === '/api/files' && req.method === 'POST') {
+        await handleUpload(req, res, origin);
+        return;
+      }
+      const fileRoute = urlPath.match(/^\/api\/files\/([a-f0-9]{24})(?:\/preview\/([12]))?$/);
+      if (fileRoute && (req.method === 'GET' || req.method === 'HEAD')) {
+        await handleFile(req, res, fileRoute[1], fileRoute[2] ? Number(fileRoute[2]) : 0);
+        return;
+      }
+
       /* ---- API ---- */
       /* 部署自检用：只回报「请求里有没有带身份」，不含任何令牌内容。
        * 已改为仅管理员可见，其他人按 404 处理，不暴露这个接口存在。 */
@@ -787,6 +977,16 @@ export async function createPilotServer(options = {}) {
           return;
         }
         const body = JSON.stringify(store.sanitizeForDisk(db), null, 2);
+        // ?full=1：连上传文件一起导出，解压到数据目录即可恢复
+        if (new URL(req.url, 'http://local').searchParams.get('full') === '1') {
+          res.writeHead(200, {
+            'content-type': 'application/x-tar',
+            'content-disposition': 'attachment; filename="gongye-backup.tar"',
+            'cache-control': 'no-store'
+          });
+          await files.writeBackup(res, body, db.uploads);
+          return;
+        }
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'content-disposition': 'attachment; filename="gongye-db.json"',
@@ -801,15 +1001,39 @@ export async function createPilotServer(options = {}) {
           ok: true,
           users: db.users.length,
           posts: db.posts.length,
-          allowlist: { emails: allowlist.emails.size, domains: allowlist.domains.size }
+          allowlist: { emails: allowlist.emails.size, domains: allowlist.domains.size },
+          scan: scanner ? 'on' : 'off'
         });
+        return;
+      }
+
+      /* 导出我的数据：只给本人，包含邮箱等完整个人信息 */
+      if (urlPath === '/api/me/export' && (req.method === 'GET' || req.method === 'HEAD')) {
+        const me = userFromRequest(db, req);
+        if (!me) {
+          sendJson(res, 401, { error: { code: 'login', message: '请先登录' } });
+          return;
+        }
+        const data = S.personalData(db, me.id);
+        data.uploads = db.uploads.filter((row) => row.ownerId === me.id)
+          .map((row) => pickFields(row, ['id', 'kind', 'name', 'sizeBytes', 'pages', 'createdAt', 'postId']));
+        sendJson(res, 200, data, {
+          'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent('共页-我的数据.json')}`
+        });
+        return;
+      }
+
+      if (urlPath === '/api/circles/index') {
+        // 全量圈索引：id/courseId/status，供前端缓存后本地筛选
+        const items = (db.circles || []).map((circle) => [circle.id, circle.courseId, circle.status || 'active']);
+        sendJson(res, 200, { version: 1, items });
         return;
       }
 
       if (urlPath === '/api/state') {
         const me = userFromRequest(db, req);
         sendJson(res, 200, {
-          state: publicState(db, me ? me.id : null),
+          state: stateFor(me ? me.id : null),
           allowlistConfigured: allowlist.emails.size + allowlist.domains.size > 0
         });
         return;
@@ -820,7 +1044,12 @@ export async function createPilotServer(options = {}) {
           sendJson(res, 403, { error: { code: 'origin', message: '来源不被允许' } });
           return;
         }
-        if (!allowRequest(`write:${ip}`, 180, 60_000)) {
+        // 登录用户按账号限流；网关后面所有人的连接 IP 相同，不能共用一个额度
+        const caller = userFromRequest(db, req);
+        const allowed = caller
+          ? allowRequest(`write:${caller.id}`, 180, 60_000)
+          : allowRequest(`write:${ip}`, trustProxy ? 120 : 600, 60_000);
+        if (!allowed) {
           sendJson(res, 429, { error: { code: 'rate_limited', message: '操作太频繁，请稍后再试' } });
           return;
         }
@@ -839,14 +1068,6 @@ export async function createPilotServer(options = {}) {
         if (!WRITE_ACTIONS.has(name) && name !== 'cloudSignIn') {
           sendJson(res, 400, { error: { code: 'unknown_action', message: `未知操作：${name}` } });
           return;
-        }
-
-        if (name === 'createPost') {
-          const attachmentError = validatePilotCreatePostAttachments(payload);
-          if (attachmentError) {
-            sendJson(res, 400, { error: { code: 'bad_attachment', message: attachmentError } });
-            return;
-          }
         }
 
         let cloudIdentity = null;
@@ -894,6 +1115,17 @@ export async function createPilotServer(options = {}) {
           sendJson(res, 429, { error: { code: 'rate_limited', message: '私信发送太频繁，请稍后再试' } });
           return;
         }
+        let postUploads = [];
+        if (name === 'createPost') {
+          const resolved = resolvePostFiles(db, payload, me);
+          if (resolved.error) {
+            sendJson(res, 400, { error: { code: 'bad_attachment', message: resolved.error } });
+            return;
+          }
+          payload.attachments = resolved.attachments;
+          payload.images = resolved.images;
+          postUploads = resolved.uploads;
+        }
         db.session = me ? { userId: me.id } : null;
 
         let result;
@@ -940,7 +1172,7 @@ export async function createPilotServer(options = {}) {
           await store.save();
           sendJson(res, 200, {
             result,
-            state: publicState(db, result && result.ok && result.data && result.data.user ? result.data.user.id : null)
+            state: stateFor(result && result.ok && result.data && result.data.user ? result.data.user.id : null)
           }, setCookie ? { 'set-cookie': setCookie } : {});
           return;
         }
@@ -993,21 +1225,47 @@ export async function createPilotServer(options = {}) {
           result = A[name](db, actionPayload);
         }
 
-        if (name === 'downloadResource' && result && result.ok
-          && !isSupportedDemoAttachmentPath(result.data && result.data.path)) {
-          result = { ok: false, code: 'not_ready', message: '当前试用版不支持下载此文件' };
+        // 注销：作废这个账号在所有设备上的会话，删掉还没发布的上传文件
+        let accountDeleted = false;
+        if (name === 'deleteAccount' && result && result.ok) {
+          accountDeleted = true;
+          db.sessions = (db.sessions || []).filter((row) => row.userId !== me.id);
+          const unattached = db.uploads.filter((row) => row.ownerId === me.id && !row.postId);
+          db.uploads = db.uploads.filter((row) => !unattached.includes(row));
+          await files.purge(unattached);
+          setCookie = clearCookieHeader(cookieSecure);
+        }
+
+        if (name === 'downloadResource' && result && result.ok) {
+          const uploadId = uploadIdOf(result.data.path);
+          if (uploadId) {
+            result = { ...result, data: { ...result.data, path: `/api/files/${uploadId}` } };
+          } else if (!isSupportedDemoAttachmentPath(result.data.path)) {
+            result = { ok: false, code: 'not_ready', message: '这个文件暂时不能下载' };
+          }
+        }
+
+        if (name === 'createPost' && result && result.ok) {
+          postUploads.forEach((upload) => { upload.postId = result.data.postId; });
+          const resource = S.resourceForPost(db, result.data.postId);
+          const previewed = postUploads.find((upload) => upload.kind === 'pdf' && upload.previewCount);
+          if (resource && previewed) {
+            resource.previews = Array.from({ length: previewed.previewCount },
+              (_, index) => `/api/files/${previewed.id}/preview/${index + 1}`);
+          }
         }
 
         db.session = null;
         await store.save();
+        if (['removePost', 'resolveReport', 'deleteAccount'].includes(name)) await sweepFiles();
 
-        const effectiveMeId = name === 'logout'
+        const effectiveMeId = name === 'logout' || accountDeleted
           ? null
           : (me ? me.id : (result && result.ok && result.data && result.data.user ? result.data.user.id : null));
         const headers = setCookie ? { 'set-cookie': setCookie } : {};
         sendJson(res, 200, {
           result,
-          state: publicState(db, effectiveMeId)
+          state: stateFor(effectiveMeId)
         }, headers);
         return;
       }
@@ -1018,7 +1276,8 @@ export async function createPilotServer(options = {}) {
         res.end(runtimeConfigScript({
           notice,
           authMode: requireCloudAuth ? 'cloud' : 'demo-code',
-          cloud: cloudConfig
+          cloud: cloudConfig,
+          legal: options.legal || null
         }));
         return;
       }
@@ -1064,6 +1323,11 @@ export async function createPilotServer(options = {}) {
       res.writeHead(200, headers);
       res.end(req.method === 'HEAD' ? undefined : data);
     } catch (error) {
+      if (error instanceof FileError) {
+        if (!res.headersSent) sendJson(res, error.status, { error: { code: error.code, message: error.message } });
+        else res.end();
+        return;
+      }
       console.error('[pilot] 请求失败', urlPath, error);
       if (!res.headersSent) {
         sendJson(res, 500, { error: { code: 'server_error', message: '服务器出错了' } });
@@ -1090,6 +1354,7 @@ export async function createPilotServer(options = {}) {
       });
     },
     close() {
+      clearInterval(hourly);
       return new Promise((resolve) => server.close(() => resolve()));
     }
   };
