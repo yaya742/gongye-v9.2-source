@@ -292,14 +292,14 @@ export function compose(ctx) {
         </div>
 
         <div class="field">
-          ${production ? '<p class="field-help">图片上传尚未开放，已禁用；请用文字描述或上传 PDF，不接受本地 blob / base64 图片。</p>' : `<div class="compose-tools">
+          <div class="compose-tools">
             <label class="btn btn-ghost btn-sm upload-button">
               ${icon('image', 'i-sm')}添加图片
               <input class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple data-upload="image">
             </label>
             <span class="tiny muted">最多 9 张 · ${imageLimitLabel}</span>
             ${ui.pendingImages ? `<span class="tiny muted">正在处理 ${ui.pendingImages} 张…</span>` : ''}
-          </div>`}
+          </div>
           ${images.length ? `<div class="compose-images">
             ${images.map((img, index) => `<div class="compose-image">
               <img src="${esc(img.dataUrl)}" alt="${esc(img.name)}">

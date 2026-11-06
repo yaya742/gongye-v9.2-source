@@ -6,10 +6,29 @@ import { PDF_LIMITS, fileError, validatePdfBytes, scanPdfWithClamd, renderPdfPre
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const ID = new RegExp(`^${UUID}$`);
-const ROUTE = new RegExp(`^/api/files/(${UUID})/(download|preview/([12]))$`);
+const ROUTE = new RegExp(`^/api/files/(${UUID})/(download|image|preview/([12]))$`);
+const IMAGE_EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' });
+const IMAGE_MIME = Object.freeze({ jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' });
+const IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+
+/** 按文件头确认图片类型，不信任声明的 content-type */
+function sniffImage(bytes, contentType) {
+  if (contentType === 'image/jpeg') {
+    return bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (contentType === 'image/png') {
+    return bytes.length > 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (contentType === 'image/webp') {
+    return bytes.length > 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+      && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  }
+  return false;
+}
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const knownResourceStates = new Set(['indexed', 'unindexed', 'processing']);
 const publicDownload = (id) => `/api/files/${id}/download`;
+const publicImage = (id) => `/api/files/${id}/image`;
 const publicPreview = (id, page) => `/api/files/${id}/preview/${page}`;
 const safeFailure = () => fileError('file_unavailable', 404, '文件不存在或已不可用');
 const failed = (code, message) => ({ ok: false, code, message });
@@ -32,7 +51,7 @@ function sendJson(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
-function originalName(header) {
+function originalName(header, ext = 'pdf') {
   if (typeof header !== 'string' || header.length > 1500) {
     throw fileError('invalid_file_name', 400, '请提供 PDF 文件名');
   }
@@ -41,15 +60,17 @@ function originalName(header) {
     throw fileError('invalid_file_name', 400, '文件名编码无效');
   }
   if (!name || name.length > 240 || /[/\\\x00-\x1f\x7f:]/.test(name)
-      || name === '.' || name === '..' || path.extname(name).toLowerCase() !== '.pdf') {
-    throw fileError('invalid_file_name', 400, '仅支持无路径的 PDF 文件名');
+      || name === '.' || name === '..'
+      || !['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(path.extname(name).toLowerCase().slice(1))
+      || (ext === 'pdf' && path.extname(name).toLowerCase() !== '.pdf')) {
+    throw fileError('invalid_file_name', 400, '仅支持无路径的 PDF 或图片文件名');
   }
   name = name.replace(/[<>"|?*\u202a-\u202e\u2066-\u2069]/g, '_').trim().replace(/[. ]+$/, '');
-  const stem = name.slice(0, -4).trim().slice(0, 112);
+  const stem = name.slice(0, name.length - path.extname(name).length).trim().slice(0, 112);
   if (!stem || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)) {
     throw fileError('invalid_file_name', 400, '文件名不可用');
   }
-  return `${stem}.pdf`;
+  return `${stem}.${ext}`;
 }
 
 function receivePdf(req, maxBytes, signal) {
@@ -152,7 +173,7 @@ function validatePreview(result) {
  * persists immediately and MUST NOT re-enqueue behind the currently held lock.
  * prepareAttachments/finalizePost/downloadResource are deliberately synchronous.
  */
-export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClamd,
+export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClamd, imageMaxBytes = IMAGE_MAX_BYTES,
   renderPreview = renderPdfPreview, maxBytes = PDF_LIMITS.maxBytes,
   allowedDomains = ['zju.edu.cn', 'st.zju.edu.cn'] } = {}) {
   if (typeof rootDir !== 'string' || !rootDir.trim() || !db || typeof save !== 'function') {
@@ -169,6 +190,7 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
   if (db.uploads !== undefined && !Array.isArray(db.uploads)) throw new TypeError('db.uploads must be an array');
   db.uploads ||= [];
   const preparedBatches = new WeakSet();
+  const preparedImages = new WeakSet();
 
   function requireUser(user) {
     if (!user?.id) throw fileError('login', 401, '请先登录');
@@ -197,7 +219,7 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
   }
 
   function localPath(key) {
-    if (typeof key !== 'string' || !new RegExp(`^${UUID}(?:\\.pdf|\\.[12]\\.png)$`).test(key)) throw safeFailure();
+    if (typeof key !== 'string' || !new RegExp(`^${UUID}(?:\\.pdf|\\.jpg|\\.png|\\.webp|\\.[12]\\.png)$`).test(key)) throw safeFailure();
     const filename = path.resolve(root, key);
     if (!samePath(path.dirname(filename), root)) throw safeFailure();
     return filename;
@@ -243,13 +265,16 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
   }
 
   function canonical(upload) {
-    return Object.freeze({ uploadId: upload.id, kind: 'pdf', name: upload.name,
+    const kind = upload.kind === 'image' ? 'image' : 'pdf';
+    return Object.freeze({ uploadId: upload.id, kind, name: upload.name,
       sizeBytes: upload.sizeBytes, pages: upload.pages, status: 'ready',
-      path: publicDownload(upload.id), demo: false });
+      path: kind === 'image' ? publicImage(upload.id) : publicDownload(upload.id), demo: false });
   }
 
   async function upload(req, res, user) {
     const actor = requireUser(user);
+    const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (IMAGE_EXT[contentType]) return uploadImage(req, res, actor, contentType);
     const id = randomUUID();
     const record = { id, ownerId: actor.id, status: 'receiving', createdAt: new Date().toISOString(),
       objectKey: `${id}.pdf`, hash: null, pages: null, previews: [], postId: null };
@@ -330,11 +355,76 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
     }
   }
 
+  async function uploadImage(req, res, actor, contentType) {
+    const id = randomUUID();
+    const ext = IMAGE_EXT[contentType];
+    const record = { id, ownerId: actor.id, kind: 'image', status: 'receiving',
+      createdAt: new Date().toISOString(), objectKey: `${id}.${ext}`, mime: IMAGE_MIME[ext],
+      hash: null, pages: null, previews: [], postId: null };
+    db.uploads.push(record);
+    const controller = new AbortController();
+    const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+    req.once('aborted', disconnected);
+    res.once('close', disconnected);
+    try {
+      await save();
+      if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') {
+        throw fileError('unsupported_media_type', 415, '请上传原始图片文件');
+      }
+      record.name = originalName(req.headers['x-file-name'], ext);
+      const bytes = await receivePdf(req, imageMaxBytes, controller.signal);
+      record.sizeBytes = bytes.length;
+      if (!sniffImage(bytes, contentType)) throw fileError('unsupported_media_type', 415, '图片内容与声明类型不一致');
+      record.hash = createHash('sha256').update(bytes).digest('hex');
+      await privateWrite(record.objectKey, bytes);
+      record.status = 'scanning';
+      await save();
+      let verdict;
+      try {
+        verdict = await deadline((signal) => scanPdf(localPath(record.objectKey), { signal, maxBytes: imageMaxBytes }),
+          20_000, controller.signal);
+      } catch (error) {
+        if (['scan_unavailable', 'malware_detected', 'processing_timeout', 'upload_aborted'].includes(error?.code)) throw error;
+        throw fileError('scan_failed', 503, '图片未能完成安全扫描');
+      }
+      if (!(verdict === true || verdict?.clean === true)) throw fileError('scan_failed', 503, '图片未通过安全扫描');
+      requireUser(actor);
+      if (controller.signal.aborted) throw fileError('upload_aborted', 400, '文件上传已中断');
+      record.scan = 'clean';
+      record.scannedAt = new Date().toISOString();
+      record.status = 'ready';
+      record.readyAt = new Date().toISOString();
+      await save();
+      sendJson(res, 201, { attachment: { uploadId: id, kind: 'image', name: record.name,
+        sizeBytes: record.sizeBytes, status: 'ready' }, previews: [] });
+    } catch (error) {
+      const safe = publicError(error);
+      record.status = 'failed';
+      record.errorCode = safe.code;
+      record.failedAt = new Date().toISOString();
+      await discard([record.objectKey]).catch(() => {});
+      await save();
+      throw safe;
+    } finally {
+      req.removeListener('aborted', disconnected);
+      res.removeListener('close', disconnected);
+    }
+  }
+
   function usableUpload(upload) {
-    return upload && ID.test(upload.id) && upload.status === 'ready' && upload.scan === 'clean'
-      && upload.objectKey === `${upload.id}.pdf` && /^[0-9a-f]{64}$/.test(upload.hash)
+    if (!upload || !ID.test(upload.id) || upload.status !== 'ready' || upload.scan !== 'clean'
+        || !Number.isSafeInteger(upload.sizeBytes) || upload.sizeBytes <= 0
+        || !/^[0-9a-f]{64}$/.test(upload.hash)) return false;
+    if (upload.kind === 'image') {
+      const ext = String(upload.objectKey || '').startsWith(`${upload.id}.`)
+        ? String(upload.objectKey).slice(upload.id.length + 1) : '';
+      return !!IMAGE_MIME[ext] && upload.mime === IMAGE_MIME[ext]
+        && upload.sizeBytes <= imageMaxBytes
+        && Array.isArray(upload.previews) && upload.previews.length === 0;
+    }
+    return upload.objectKey === `${upload.id}.pdf`
       && Number.isInteger(upload.pages) && upload.pages >= 1 && upload.pages <= PDF_LIMITS.maxPages
-      && Number.isSafeInteger(upload.sizeBytes) && upload.sizeBytes > 0 && upload.sizeBytes <= maxBytes
+      && upload.sizeBytes <= maxBytes
       && Array.isArray(upload.previews) && upload.previews.length === Math.min(2, upload.pages)
       && upload.previews.every((entry, index) => entry.page === index + 1
         && entry.objectKey === `${upload.id}.${index + 1}.png` && /^[0-9a-f]{64}$/.test(entry.hash));
@@ -399,6 +489,49 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
     return attachments;
   }
 
+  function prepareImages(user, inputs = []) {
+    const actor = requireUser(user);
+    if (!Array.isArray(inputs)) throw fileError('invalid_image', 400, '图片列表无效');
+    if (inputs.length > 9) throw fileError('too_many_images', 400, '每帖最多 9 张图片');
+    const ids = new Set();
+    const result = inputs.map((input) => {
+      const uploadId = typeof input === 'string' ? input : input?.uploadId;
+      if (typeof uploadId !== 'string' || !ID.test(uploadId) || ids.has(uploadId)) {
+        throw fileError('invalid_image', 400, '图片参数无效');
+      }
+      ids.add(uploadId);
+      const upload = db.uploads.find((entry) => entry.id === uploadId);
+      if (!usableUpload(upload) || upload.kind !== 'image' || upload.ownerId !== actor.id) {
+        throw fileError('invalid_image', 400, '图片不存在、尚未就绪或不属于当前账号');
+      }
+      if (upload.postId) throw fileError('upload_consumed', 409, '图片已用于其他帖子，请重新上传');
+      return Object.freeze({ uploadId: upload.id, kind: 'image', path: publicImage(upload.id) });
+    });
+    Object.freeze(result);
+    preparedImages.add(result);
+    return result;
+  }
+
+  function finalizeImages(post, inputs) {
+    if (!preparedImages.has(inputs)) throw fileError('invalid_image', 400, '必须使用服务端校验后的图片');
+    const actualPost = (db.posts || []).find((entry) => entry.id === post?.id);
+    if (!actualPost || actualPost.status !== 'published') throw fileError('invalid_image', 400, '帖子不可绑定图片');
+    requireUser({ id: actualPost.authorId });
+    const bound = inputs.map((input) => {
+      const upload = db.uploads.find((entry) => entry.id === input.uploadId);
+      if (!usableUpload(upload) || upload.ownerId !== actualPost.authorId || upload.postId) {
+        throw fileError('upload_consumed', 409, '图片不可重复绑定');
+      }
+      return upload;
+    });
+    for (const upload of bound) {
+      upload.postId = actualPost.id;
+      upload.boundAt = new Date().toISOString();
+    }
+    preparedImages.delete(inputs);
+    return inputs.map((input) => input.path);
+  }
+
   function publishedAttachment(upload) {
     if (!usableUpload(upload) || !upload.postId || !upload.attachmentId) return null;
     const attachment = (db.attachments || []).find((entry) => entry.id === upload.attachmentId);
@@ -417,6 +550,14 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
       if (!circle || !['active', 'archived'].includes(circle.status)) return null;
     }
     return { attachment, post };
+  }
+
+  function publishedImage(upload) {
+    if (!upload || upload.kind !== 'image' || !upload.postId) return null;
+    const post = (db.posts || []).find((entry) => entry.id === upload.postId);
+    const author = (db.users || []).find((entry) => entry.id === post?.authorId);
+    if (!post || post.status !== 'published' || !author || author.status !== 'active') return null;
+    return { upload, post };
   }
 
   function checkViewer(user) {
@@ -448,6 +589,18 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
     checkViewer(user);
     const upload = db.uploads.find((entry) => entry.id === id);
     if (!usableUpload(upload)) throw safeFailure();
+    if (operation === 'image') {
+      // 图片随帖子公开：帖子已发布且作者可用才可读，不要求登录
+      if (!publishedImage(upload)) throw safeFailure();
+      let bytes;
+      try { bytes = await privateRead(upload.objectKey, imageMaxBytes); } catch { throw safeFailure(); }
+      if (createHash('sha256').update(bytes).digest('hex') !== upload.hash) throw safeFailure();
+      res.writeHead(200, { 'Content-Type': upload.mime, 'Content-Length': bytes.length,
+        'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff',
+        'Cross-Origin-Resource-Policy': 'same-origin', 'Content-Disposition': 'inline', 'Referrer-Policy': 'no-referrer' });
+      res.end(req.method === 'HEAD' ? undefined : bytes);
+      return;
+    }
     if (operation === 'download') {
       requireUser(user);
       if (!publishedAttachment(upload)) throw safeFailure();
@@ -517,5 +670,5 @@ export function createFileService({ rootDir, db, save, scanPdf = scanPdfWithClam
     return true;
   }
 
-  return { handle, prepareAttachments, finalizePost, downloadResource };
+  return { handle, prepareAttachments, finalizePost, prepareImages, finalizeImages, downloadResource };
 }

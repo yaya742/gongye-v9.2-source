@@ -1,6 +1,6 @@
 {
   "name": "gongye-web",
-  "version": "10.0.0",
+  "version": "10.1.0",
   "private": true,
   "type": "module",
   "description": "共页：浙大课程学习互助（可信邮箱、共享数据库、私有资料）",
@@ -8,7 +8,7 @@
     "start": "node server/index.mjs",
     "dev": "node scripts/serve.mjs",
     "serve": "node scripts/serve.mjs",
-    "pilot": "node server/pilot.mjs",
+    "pilot": "node server/pilot-entry.mjs",
     "test": "node --test tests/*.test.mjs",
     "import:preview": "node scripts/import-resources.mjs",
     "smoke": "node scripts/smoke-deploy.mjs",

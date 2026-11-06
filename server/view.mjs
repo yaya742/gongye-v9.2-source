@@ -65,7 +65,8 @@ export function publicState(db, meId) {
     courses: list(db, 'courses').map((c) => fields(c, ['id', 'school', 'name', 'code', 'category'])),
     circles: list(db, 'circles').map((c) => ({ ...fields(c, ['id', 'courseId', 'status', 'createdAt', 'pinnedPostId', 'archivedAt']), memberCount: memberCounts[c.id] || 0 })),
     memberships: own('memberships', ['userId', 'circleId', 'status', 'muted', 'moderationMuted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted']),
-    posts: posts.map((p) => ({ ...fields(p, ['id', 'authorId', 'board', 'circleId', 'courseId', 'title', 'body', 'stickerId', 'tags', 'status', 'publishedAt', 'editedAt', 'acceptedCommentId', 'contentUpdatedAt', 'confirmedOriginal', 'term', 'chapter']), images: [],
+    posts: posts.map((p) => ({ ...fields(p, ['id', 'authorId', 'board', 'circleId', 'courseId', 'title', 'body', 'stickerId', 'tags', 'status', 'publishedAt', 'editedAt', 'acceptedCommentId', 'contentUpdatedAt', 'confirmedOriginal', 'term', 'chapter']),
+      images: (Array.isArray(p.images) ? p.images : []).filter((src) => /^\/api\/files\/[0-9a-f-]{36}\/image$/.test(String(src))),
       ...(admin ? fields(p, ['moderatedAt', 'moderatedBy', 'moderateReason', 'removedAt', 'removeReason']) : {}) })),
     comments: list(db, 'comments').filter((c) => postIds.has(c.postId) && (admin || c.status === 'visible' && !banned.has(c.authorId)))
       .map((c) => fields(c, ['id', 'postId', 'authorId', 'parentId', 'replyToUserId', 'body', 'stickerId', 'status', 'createdAt', 'editedAt'])),

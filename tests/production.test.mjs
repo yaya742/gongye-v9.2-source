@@ -13,6 +13,8 @@ const files = {
   async handle() { return false; },
   async prepareAttachments(_user, inputs) { assert.deepEqual(inputs, []); return []; },
   async finalizePost() {},
+  prepareImages() { return []; },
+  finalizeImages() {},
   async downloadResource() { return { ok: false, code: 'not_found', message: '未找到文件' }; }
 };
 async function fixture(run, options = {}) {

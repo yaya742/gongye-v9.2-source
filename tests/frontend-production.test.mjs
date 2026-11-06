@@ -93,7 +93,7 @@ test('production resource and post forms expose real PDF input and explicit sour
     assert.match(html, /name="source"/);
     assert.match(html, /name="rights"/);
     for (const right of ['原创', '已授权', '公开许可']) assert.ok(html.includes(`value="${right}"`));
-    assert.doesNotMatch(html, /data-file-picker|assets\/samples\/|data-upload="image"/);
+    assert.doesNotMatch(html, /data-file-picker|assets\/samples\//);
     assert.doesNotMatch(html, /name="original"[^>]*checked/);
     ctx.ui.uploading = true;
     assert.match(render(ctx), /type="submit"[^>]*disabled/);
@@ -102,7 +102,7 @@ test('production resource and post forms expose real PDF input and explicit sour
   assert.match(html, /name="courseId"/);
   assert.match(html, /name="postTerm"/);
   assert.match(html, /name="chapter"/);
-  assert.match(html, /图片上传尚未开放/);
+  assert.match(html, /data-upload="image"/);
 });
 
 test('upload unavailability and ready receipts are shown truthfully; demo stays separate', () => {

@@ -115,8 +115,8 @@ export async function createProductionServer(options = {}) {
         maxBytes: options.maxBytes || 20 * 1024 * 1024, allowedDomains: auth.domains });
     }
   } catch (error) { await store.close(); throw error; }
-  const filePolicy = { allowedTypes: ['application/pdf'], maxBytes: options.maxBytes || 20 * 1024 * 1024,
-    maxFiles: 3, images: false, requiresScan: true, requiresPreview: true };
+  const filePolicy = { allowedTypes: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'], maxBytes: options.maxBytes || 20 * 1024 * 1024, maxImageBytes: 3 * 1024 * 1024,
+    maxFiles: 3, maxImages: 9, images: true, requiresScan: true, requiresPreview: true };
   const supportEmail = /^[^\s<>@]+@[^\s<>@]+\.[a-z]{2,}$/i.test(options.supportEmail || process.env.SUPPORT_EMAIL || '')
     ? String(options.supportEmail || process.env.SUPPORT_EMAIL).trim() : '';
   const runtimeConfig = () => `window.__GONGYE_CONFIG__ = ${JSON.stringify({ mode: 'production', production: true,
@@ -163,14 +163,18 @@ export async function createProductionServer(options = {}) {
           if (post && (author?.status !== 'active' || post.status !== 'published') && post.authorId !== user.id) throw issue(404, 'not_found', '内容不可用');
         }
         if (name === 'createPost') {
-          if (payload.images?.length) throw issue(400, 'images_disabled', '暂不支持图片上传');
+          // 图片随帖子公开；只接受本人上传且未使用的 uploadId，路径由服务端生成
           const inputs = Array.isArray(payload.attachments) ? payload.attachments : [];
           if (inputs.length > 3) throw issue(400, 'too_many_files', '最多 3 个 PDF 附件');
           const prepared = await files.prepareAttachments(user, inputs.map((input) => ({ uploadId: input?.uploadId })));
-          result = A.createPost(db, { ...payload, images: [], attachments: prepared });
+          const imageInputs = Array.isArray(payload.images) ? payload.images : [];
+          if (imageInputs.length > 9) throw issue(400, 'too_many_images', '每帖最多 9 张图片');
+          const preparedImages = files.prepareImages(user, imageInputs);
+          result = A.createPost(db, { ...payload, images: preparedImages.map((entry) => entry.path), attachments: prepared });
           if (result.ok) {
             const post = db.posts.find((p) => p.id === result.data.postId);
             await files.finalizePost(post, prepared);
+            files.finalizeImages(post, preparedImages);
           }
         } else if (name === 'downloadResource') result = await files.downloadResource(user, payload);
         else {

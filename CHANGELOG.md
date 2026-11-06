@@ -28,7 +28,29 @@
 
 ---
 
-## [Unreleased]
+## [10.1.0] - 2026-11-06
+
+### Added · 生产后端图片上传（2026-11-06）
+- 生产服务支持图片上传与公开读取：`POST /api/files` 接受 `image/jpeg`、`image/png`、`image/webp`，按文件头校验类型（拒绝 SVG/伪造类型），单张 ≤ 3 MiB；写入私有目录，配置 ClamAV 时同样过扫描（未配置则拒绝上传）。
+- 发帖 `images` 最多 9 项，只接受本人上传且未使用的 `uploadId`；路径由服务端生成为 `/api/files/<id>/image`，客户端不能提交任意 URL。
+- 图片随帖子公开：帖子已发布且作者可用时 `GET /api/files/:id/image` 无需登录；下架、封禁或删帖后立即 404。
+- 前端：手机照片先压到长边 1920 并去掉 EXIF，再上传并提交 `uploadId`；发布页图片区不再提示"暂未开放"。
+  - 文件：`server/files.mjs`、`server/production.mjs`、`server/view.mjs`、`src/main.js`、`src/pages/posts.js`
+  - 影响：新增路由 `/api/files/:id/image`；`uploads` 记录新增 `kind='image'`、`mime`；`filePolicy.images` 改为 `true` 并新增 `maxImages`、`maxImageBytes`；图片文件随数据目录一起备份。
+  - 验证：新增 `tests/images.test.mjs`（本人绑定、游客可读、他人图片被拒、伪造图片 415、下架后 404）；全量 `node --test tests/*.test.mjs` 137 项，132 通过 0 失败 5 跳过。
+  - 回滚：还原上述文件并删除 `tests/images.test.mjs`；已上传的图片文件可保留，旧代码不会读取。
+
+### Added · 整合 GitHub update-2026-11-04（界面 / 上传 / 圈治理 / 账号安全）（2026-11-06）
+- 把仓库 `yaya742/gongye-v9.2-source` 分支 `update-2026-11-04`（dd94240）的功能合并进 v10 生产线：以 v9.2（47d5f92）为基线做三方合并，冲突 18 个文件已逐个处理。
+  - 文件：`src/main.js`、`src/components/ui.js`、`src/components/layout.js`、`src/pages/{posts,account,circles,misc,resources}.js`、`src/state/{actions,selectors}.js`、`src/data/seed.js`、`src/api/client.js`、`server/{pilot,index,files}.mjs`、`tests/*.test.mjs`
+  - 影响：新增拉黑、私信举报、圈内置顶、建圈审批、圈内禁言（1/7/30 天或长期）、注销账号、导出个人数据、用户协议与隐私政策页（`#/terms`、`#/privacy`）、真实文件上传（PDF/图片，按 ID 鉴权）、手机照片压缩去 EXIF、每小时快照与全量 tar 备份、`TRUST_PROXY` 取真实 IP。`STORE_VERSION` 未变。
+  - 两套上传实现并存：生产走 `server/files.mjs`（v10，PDF + 扫描），试用后端走 `server/files-pilot.mjs`（原 GitHub 版，PDF/图片）；`server/pilot.mjs` 采用 GitHub 版（含备份、gzip、扫描），启动入口拆到 `server/pilot-entry.mjs`，`npm run pilot` 已同步。
+  - 生产约束保留：生产模式图片上传仍禁用（服务端只收 PDF）；发帖表单保留来源/授权与「文档来源」勾选、课程必选（不挂圈时）、学期与章节字段；下载只接受同源 `/api/files/<id>/download`；关于页保留「不是浙江大学官方」等合规声明。
+  - 验证：`node scripts/check.mjs` 通过（45 模块 / 25 路由 / 36 素材）；`node --test tests/*.test.mjs` 136 项，131 通过 0 失败 5 跳过（跳过为原有真实渲染与符号链接项）。
+  - 回滚：还原上述文件；`server/files.mjs`、`server/files-pilot.mjs`、`server/pilot-entry.mjs` 三个文件需一起还原，否则 `npm run pilot` 入口失效。
+- 测试适配（非业务改动）：演示帖子清理导致多数用例无内容可测，`boot`/`community`/`frontend-production` 的种子改为 `createSeed(now, { keepDemoPosts: true })`；`submitPost` 用例补 `pendingImageCount`、`filesUploading` 依赖；建圈申请用例改用语料外的「量子烹饪学」（v10 目录含 2375 门课，"数字电路"已存在）；禁用动作与云登录拒绝用例接受 401/403 两种拒绝码。
+  - 文件：`tests/boot.test.mjs`、`tests/community.test.mjs`、`tests/frontend-production.test.mjs`、`tests/logic.test.mjs`、`tests/production.test.mjs`
+  - 验证：同上 `node --test tests/*.test.mjs` 全绿。
 
 ### Added · 部署与上线自检（2026-11-02）
 - 新增 `Dockerfile`、`.dockerignore`、`compose.yaml`（应用 + ClamAV + Caddy 自动 HTTPS）、`deploy/Caddyfile`、`deploy/gongye.service`（systemd 非 Docker 方案）与 `.env.example` 的 `DOMAIN` 变量。

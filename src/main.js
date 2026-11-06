@@ -1749,7 +1749,7 @@ async function submitPost(form) {
     chapter: String(fd.get('chapter') || ''),
     source: String(fd.get('source') || ''),
     rights: String(fd.get('rights') || ''),
-    images: isRemote ? [] : ui.images.map((img) => img.dataUrl),
+    images: isRemote ? ui.images.map((img) => img.uploadId).filter(Boolean) : ui.images.map((img) => img.dataUrl),
     attachments: publicationAttachments(),
     confirmedOriginal: fd.get('original') === 'on',
     stickerId: String(fd.get('stickerId') || '') || null,
@@ -2063,8 +2063,6 @@ function blobToDataUrl(blob) {
 }
 
 function parseImages(fileList) {
-  // 生产后端尚未开放图片上传（服务端只收 PDF），先明确拦住，避免停在“正在处理”
-  if (isRemote) return toast('图片上传暂未开放，请用 PDF 或文字描述。', 'error');
   const generation = imageReadGeneration;
   Array.from(fileList).forEach((file) => {
     if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
