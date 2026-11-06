@@ -17,7 +17,11 @@ function currentFor(route, names) {
 export function renderHeader(ctx) {
   const { db, me, route } = ctx;
   const unread = me ? S.unreadCount(db, me.id) : 0;
+  const directUnread = me ? (db.directMessages || [])
+    .filter((message) => message.recipientId === me.id && !message.readAt).length : 0;
+  const totalUnread = unread + directUnread;
   const q = route.query.q || '';
+  const pageHasScopedSearch = ['resourcesHome', 'resources', 'search'].includes(route.name);
 
   const nav = NAV.map((item) => {
     const current = currentFor(route, item.match);
@@ -38,10 +42,11 @@ export function renderHeader(ctx) {
         placeholder="搜全站：资料、课程或讨论" autocomplete="off">
     </form>
     <div class="header-actions">
+      ${pageHasScopedSearch ? '' : `<a class="icon-btn header-search-link" href="${href('/search')}" aria-label="搜索">${icon('search')}</a>`}
       <a class="btn btn-sm btn-publish" href="${href('/publish')}">${icon('plus', 'i-sm')}发布</a>
-      <a class="icon-btn" href="${href('/me/messages')}" aria-label="消息${unread ? `，${unread} 条未读` : ''}">
+      <a class="icon-btn header-bell" href="${href('/me/messages')}" aria-label="消息${totalUnread ? `，${totalUnread} 条未读` : ''}">
         ${icon('bell')}
-        ${unread ? `<span class="badge">${unread > 9 ? '9+' : unread}</span>` : ''}
+        ${totalUnread ? `<span class="badge">${totalUnread > 9 ? '9+' : totalUnread}</span>` : ''}
       </a>
       ${me
         ? `<a class="icon-btn avatar-btn" href="${href(`/u/${me.id}`)}" aria-label="我的主页">
@@ -49,6 +54,17 @@ export function renderHeader(ctx) {
            </a>`
         : `<a class="btn btn-ghost btn-sm" href="${href('/login')}">登录</a>`}
     </div>
+  </div>`;
+}
+
+export function renderFooter() {
+  return `<div class="footer-inner">
+    <span>共页 · 同学之间的学习社区</span>
+    <nav aria-label="站点信息">
+      <a href="${href('/about')}">关于共页</a>
+      <a href="${href('/terms')}">用户协议</a>
+      <a href="${href('/privacy')}">隐私政策</a>
+    </nav>
   </div>`;
 }
 
@@ -63,16 +79,16 @@ export function renderMobileNav(ctx) {
   const { db, me, route } = ctx;
   const unread = me ? S.unreadCount(db, me.id) : 0;
   const items = [
-    { label: '找资料', icon: 'home', to: '/', match: ['resourcesHome', 'resources', 'resource', 'resourcePublish'] },
+    { label: '找资料', icon: 'home', to: '/', match: ['resourcesHome', 'resources', 'resource'] },
     { label: '课友圈', icon: 'circle', to: '/circles', match: ['circles', 'circle', 'findCircles', 'invite'] },
-    { label: '发布', icon: 'plus', to: '/publish', match: ['compose', 'postEdit'] },
+    { label: '发布', icon: 'plus', to: '/publish', match: ['compose', 'postEdit', 'resourcePublish'], publish: true },
     { label: '消息', icon: 'bell', to: '/me/messages', match: ['messages'], badge: unread },
-    { label: '我的', icon: 'user', to: me ? `/u/${me.id}` : '/login', match: ['profile', 'saved', 'wallet', 'settings', 'login'] }
+    { label: '我的', icon: 'user', to: me ? `/u/${me.id}` : '/login', match: ['profile', 'saved', 'wallet', 'growth', 'settings', 'login'] }
   ];
   return items.map((item) => {
     const current = item.match.includes(route.name) ? 'aria-current="page"' : '';
     const badge = item.badge ? `<span class="badge">${item.badge > 9 ? '9+' : item.badge}</span>` : '';
-    return `<a href="${href(item.to)}" ${current}>
+    return `<a href="${href(item.to)}" ${item.publish ? 'class="nav-publish"' : ''} ${current}>
       ${icon(item.icon)}${badge}<span>${esc(item.label)}</span>
     </a>`;
   }).join('');

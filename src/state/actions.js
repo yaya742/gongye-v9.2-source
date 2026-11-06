@@ -3,7 +3,7 @@
  * 生产环境需要把这些校验原样实现在可信后端（见 README）。
  */
 
-import { shanghaiDate, countChars, BOARDS, levelOf, TERMS, RESOURCE_TYPES } from '../lib/format.js';
+import { shanghaiDate, countChars, BOARDS, levelOf, TERMS, RESOURCE_TYPES, SCHOOLS } from '../lib/format.js';
 import { GROWTH_RULES, effectiveTextLength, normalizeForDedupe } from '../data/growth.js';
 import { quoteOfDay, bookmarkOfDay } from '../data/quotes.js';
 import { isValidSticker } from '../data/stickers.js';
@@ -48,9 +48,17 @@ function logEvent(db, type, meta = {}) {
   if (db.events.length > 400) db.events.splice(0, db.events.length - 400);
 }
 
+/* 设置页里可以关闭的通知；采纳、退款和系统通知始终发送 */
+const NOTIFY_PREF_BY_TYPE = { reply: 'replies', gift: 'gifts' };
+
 function notifyUser(db, payload) {
   if (!db.notifications) db.notifications = [];
   if (!payload.userId || payload.userId === payload.actorId) return null;
+  const prefKey = NOTIFY_PREF_BY_TYPE[payload.type];
+  const prefs = db.prefs && db.prefs[payload.userId];
+  if (prefKey && prefs && prefs[prefKey] === false) return null;
+  // 被拉黑的人做的事（回复、送页签）不再提醒拉黑方
+  if (payload.actorId && S.blockedBy(db, payload.userId, payload.actorId)) return null;
   const entry = {
     id: newId('n'), readAt: null, createdAt: new Date().toISOString(),
     commentId: null, postId: null, ...payload
@@ -317,17 +325,21 @@ export function updateProfile(db, { nickname, bio, avatar }) {
   return ok('资料已更新');
 }
 
-export function updatePrefs(db, { patch }) {
+export function updatePrefs(db, { patch = {} }) {
   const user = me(db);
   if (!user) return fail('login', '请先登录');
   db.prefs = db.prefs || {};
-  db.prefs[user.id] = { ...(db.prefs[user.id] || {}), ...patch };
+  const next = { ...(db.prefs[user.id] || {}) };
+  Object.values(NOTIFY_PREF_BY_TYPE).forEach((key) => {
+    if (typeof patch[key] === 'boolean') next[key] = patch[key];
+  });
+  db.prefs[user.id] = next;
   return ok('通知设置已保存');
 }
 
 /* ---------- 帖子 ---------- */
 
-function validatePostInput(db, user, input) {
+function validatePostInput(db, user, input, now = Date.now()) {
   const board = BOARDS.some((b) => b.key === input.board) ? input.board : null;
   if (!board) return fail('bad_board', '请选择一个板块');
 
@@ -347,10 +359,12 @@ function validatePostInput(db, user, input) {
   if (circleId) {
     const circle = S.circleOf(db, circleId);
     if (!circle) return fail('circle_missing', '课友圈不存在');
-    const block = S.circleWriteBlock(db, user.id, circleId);
+    const block = S.circleWriteBlock(db, user.id, circleId, now);
     if (!block.ok) return fail(block.code, block.message);
     // 圈内课程由圈派生，忽略客户端传入的 courseId，避免挂错课程
     courseId = circle.courseId;
+  } else if (courseId && !S.courseOf(db, courseId)) {
+    return fail('bad_course', '这门课程不在目录里，请重新选择');
   }
 
   if (db.production && (!courseId || courseId === 'c_general' || !S.courseOf(db, courseId))) {
@@ -376,7 +390,7 @@ export function createPost(db, input = {}, now = Date.now()) {
   if (!user) return fail('login', '请先登录');
   if (!user.verified) return fail('unverified', '验证邮箱后才能发布');
 
-  const checked = validatePostInput(db, user, input);
+  const checked = validatePostInput(db, user, input, now);
   if (!checked.ok) return checked;
 
   const { board, body, title, tags, circleId, courseId, term, chapter, images, attachmentInputs } = checked.data;
@@ -430,9 +444,9 @@ export function createPost(db, input = {}, now = Date.now()) {
       version: 1,
       status: att.status === 'processing' ? 'processing' : 'ready',
       path: att.path || null,
-      demoPath: att.path || 'assets/samples/demo-calculus-notes.pdf',
+      demoPath: att.demo === false ? null : (att.path || 'assets/samples/demo-calculus-notes.pdf'),
       changeNote: '',
-      demo: true
+      demo: att.demo !== false
     });
   });
 
@@ -725,12 +739,12 @@ export function addComment(db, input = {}, now = Date.now()) {
     const isMember = S.isActiveMember(db, user.id, post.circleId);
     const hasPublicResource = S.resourceEligibility(db, S.resourceForPost(db, postId)).ok;
     if (isMember) {
-      const block = S.circleWriteBlock(db, user.id, post.circleId);
+      const block = S.circleWriteBlock(db, user.id, post.circleId, now);
       if (!block.ok) return fail(block.code, block.message);
     } else if (!hasPublicResource) {
       return fail('not_member', '加入这个课友圈后才能评论普通帖子；公开资料帖可以纠错');
     } else {
-      const block = S.resourceCommentBlock(db, user.id, post);
+      const block = S.resourceCommentBlock(db, user.id, post, now);
       if (!block.ok) return fail(block.code, block.message);
     }
   } else if (!user.verified) {
@@ -948,18 +962,34 @@ export function markCircleSeen(db, { circleId }, now = Date.now()) {
   return ok('', { lastSeenAt: m.lastSeenAt });
 }
 
-export function submitApplication(db, { courseId, reason = '' }, now = Date.now()) {
+const normalizeCourseName = (name) => String(name || '').replace(/\s+/g, '').toLowerCase();
+
+function findCourseByName(db, name) {
+  const target = normalizeCourseName(name);
+  return (db.courses || []).find((course) => normalizeCourseName(course.name) === target) || null;
+}
+
+/** 申请建圈：可以选目录里的课程，也可以写目录里还没有的课程名 */
+export function submitApplication(db, { courseId, courseName = '', reason = '' }, now = Date.now()) {
   const user = me(db);
   if (!user) return fail('login', '请先登录');
-  if (!courseId || !S.courseOf(db, courseId)) return fail('bad_course', '请选择已有课程');
-  if (S.circleOfCourse(db, courseId)) return fail('duplicate', '这门课已经有课友圈了，直接加入即可');
+  const name = String(courseName || '').trim();
+  let course = courseId ? S.courseOf(db, courseId) : null;
+  if (courseId && !course) return fail('bad_course', '请选择已有课程');
+  if (!course) {
+    if (name.length < 2 || name.length > 40) return fail('bad_course', '课程名称需要 2–40 个字符');
+    course = findCourseByName(db, name);
+  }
+  if (course && S.circleOfCourse(db, course.id)) return fail('duplicate', '这门课已经有课友圈了，直接加入即可');
+  const finalName = course ? course.name : name;
+
   db.applications = db.applications || [];
-  const existing = db.applications.find(
-    (a) => a.applicantId === user.id && a.courseId === courseId && a.state === 'pending'
-  );
+  const existing = db.applications.find((a) => a.applicantId === user.id && a.state === 'pending'
+    && normalizeCourseName(a.courseName || (S.courseOf(db, a.courseId) || {}).name) === normalizeCourseName(finalName));
   if (existing) return ok('这份申请已经在等待审核', { application: existing });
   const application = {
-    id: newId('ap'), applicantId: user.id, courseId, reason,
+    id: newId('ap'), applicantId: user.id, courseId: course ? course.id : null, courseName: finalName,
+    reason: String(reason || '').slice(0, 200),
     state: 'pending', createdAt: new Date(now).toISOString(), reviewerId: null
   };
   db.applications.push(application);
@@ -1005,6 +1035,55 @@ export function setCircleRestriction(db, { circleId, userId, restricted, reason 
     text: `课程圈发言限制已${restricted === true ? '开启' : '解除'}：${member.restrictionReason}`,
     createdAt: new Date(now).toISOString() });
   return ok(restricted === true ? '已限制圈内发言' : '已解除发言限制');
+}
+
+/** 管理员处理建圈申请：通过时按需新增课程并建圈，驳回时必须写理由 */
+export function resolveApplication(db, { applicationId, action, reason = '' }, now = Date.now()) {
+  const user = me(db);
+  if (!user || user.role !== 'admin') return fail('forbidden', '只有管理员可以处理建圈申请');
+  const application = S.byId(db.applications, applicationId);
+  if (!application) return fail('not_found', '申请不存在');
+  if (application.state !== 'pending') return fail('closed', '这份申请已经处理过');
+  const courseName = application.courseName || (S.courseOf(db, application.courseId) || {}).name || '';
+  const stamp = new Date(now).toISOString();
+
+  if (action === 'reject') {
+    const note = String(reason || '').trim();
+    if (!note) return fail('no_reason', '驳回时需要写明理由');
+    Object.assign(application, { state: 'rejected', reviewerId: user.id, reviewedAt: stamp, resolution: note });
+    audit(db, user.id, '驳回建圈申请', `申请 ${application.id}`, note);
+    notifyUser(db, {
+      userId: application.applicantId, actorId: null, type: 'system', createdAt: stamp,
+      text: `「${courseName}」的建圈申请未通过：${note}`
+    });
+    return ok('已驳回申请');
+  }
+  if (action !== 'approve') return fail('bad_action', '未知的处理方式');
+
+  let course = S.courseOf(db, application.courseId) || findCourseByName(db, courseName);
+  if (!course) {
+    const sample = (db.courses || []).find((item) => item.id !== 'c_general');
+    course = {
+      id: newId('c'), school: sample ? sample.school : SCHOOLS[0],
+      name: courseName, code: '', category: '同学申请'
+    };
+    db.courses.push(course);
+  }
+  let circle = S.circleOfCourse(db, course.id);
+  if (!circle) {
+    const created = createCircle(db, { courseId: course.id }, now);
+    if (!created.ok) return created;
+    circle = created.data.circle;
+  }
+  Object.assign(application, {
+    state: 'approved', courseId: course.id, circleId: circle.id, reviewerId: user.id, reviewedAt: stamp
+  });
+  audit(db, user.id, '通过建圈申请', `申请 ${application.id}`, course.name);
+  notifyUser(db, {
+    userId: application.applicantId, actorId: null, type: 'system', createdAt: stamp,
+    text: `「${course.name}」的课友圈已开通，可以去加入了。`
+  });
+  return ok('已通过申请并开通课友圈', { circleId: circle.id });
 }
 
 /* ---------- 资料 ---------- */
@@ -1071,7 +1150,7 @@ export function downloadResource(db, { postId, attachmentId }, now = Date.now())
 
   const resource = S.resourceForPost(db, postId);
   logEvent(db, 'resource_download_authorized', { resourceId: resource ? resource.id : null, postId });
-  return ok('已开始下载（演示示例文件）', { path: att.path, name: att.name });
+  return ok(att.demo === false ? '已开始下载' : '已开始下载（演示示例文件）', { path: att.path, name: att.name });
 }
 
 /* ---------- 页签 ---------- */
@@ -1185,24 +1264,83 @@ export function markAllNotificationsRead(db, payload = {}, now = Date.now()) {
   return ok('全部标为已读');
 }
 
+/* ---------- 私信 ---------- */
+
+export function sendDirectMessage(db, { recipientId, body }, now = Date.now()) {
+  const sender = me(db);
+  if (!sender) return fail('login', '请先登录');
+  if (sender.status !== 'active') return fail('suspended', '账号已停用，不能发送私信');
+  if (!sender.verified) return fail('unverified', '验证邮箱后才能发送私信');
+
+  const recipient = S.userOf(db, String(recipientId || ''));
+  if (!recipient || recipient.status !== 'active') return fail('bad_recipient', '这个账号当前不可接收私信');
+  if (recipient.id === sender.id) return fail('self_message', '不能给自己发送私信');
+  if (S.blockedBy(db, sender.id, recipient.id)) return fail('blocked', '你已拉黑对方，取消拉黑后才能发私信');
+  if (S.blockedBy(db, recipient.id, sender.id)) return fail('blocked', '对方暂时不接收你的私信');
+
+  const text = String(body || '').trim();
+  if (!text) return fail('empty_message', '私信内容不能为空');
+  if (text.length > 2000) return fail('message_too_long', '私信最多 2000 字符');
+
+  if (!Array.isArray(db.directMessages)) db.directMessages = [];
+  const message = {
+    id: newId('dm'), senderId: sender.id, recipientId: recipient.id,
+    body: text, createdAt: new Date(now).toISOString(), readAt: null
+  };
+  db.directMessages.push(message);
+  return ok('私信已发送', { messageId: message.id });
+}
+
+export function markDirectMessagesRead(db, { peerId }, now = Date.now()) {
+  const user = me(db);
+  if (!user) return fail('login', '请先登录');
+  const peer = S.userOf(db, String(peerId || ''));
+  if (!peer || peer.id === user.id) return fail('bad_recipient', '对话对象无效');
+
+  const stamp = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
+  let changed = 0;
+  (db.directMessages || []).forEach((message) => {
+    if (message.senderId === peer.id && message.recipientId === user.id && !message.readAt) {
+      message.readAt = stamp;
+      changed += 1;
+    }
+  });
+  return ok(changed ? '已标为已读' : '', { changed });
+}
+
 /* ---------- 举报与审核 ---------- */
 
 export function reportContent(db, { targetType, targetId, reason, detail = '' }, now = Date.now()) {
   const user = me(db);
   if (!user) return fail('login', '请先登录后再举报');
-  if (!['post', 'comment'].includes(targetType)) return fail('bad_target', '未知的举报对象');
+  if (!['post', 'comment', 'dm'].includes(targetType)) return fail('bad_target', '未知的举报对象');
   if (!reason) return fail('no_reason', '请选择举报原因');
-  const target = targetType === 'post' ? S.postOf(db, targetId) : S.byId(db.comments, targetId);
-  if (!target) return fail('not_found', '举报对象不存在');
+
+  // 私信举报：只附上对方发给举报人的最近 10 条，管理员看不到举报人没收到的内容
+  let evidence;
+  if (targetType === 'dm') {
+    const peer = S.userOf(db, String(targetId || ''));
+    if (!peer || peer.id === user.id) return fail('not_found', '举报对象不存在');
+    evidence = (db.directMessages || [])
+      .filter((row) => row.senderId === peer.id && row.recipientId === user.id && row.status !== 'removed')
+      .slice(-10)
+      .map((row) => ({ id: row.id, body: row.body, createdAt: row.createdAt }));
+    if (!evidence.length) return fail('no_evidence', '对方还没有给你发过私信，没有可举报的内容');
+  } else {
+    const target = targetType === 'post' ? S.postOf(db, targetId) : S.byId(db.comments, targetId);
+    if (!target) return fail('not_found', '举报对象不存在');
+  }
+
   db.reports = db.reports || [];
   const duplicated = db.reports.some(
     (r) => r.reporterId === user.id && r.targetType === targetType && r.targetId === targetId && r.status === 'open'
   );
   if (duplicated) return ok('你已经举报过，平台会处理这一条', {});
   db.reports.push({
-    id: newId('rp'), reporterId: user.id, targetType, targetId, reason,
+    id: newId('rp'), reporterId: user.id, targetType, targetId, reason: String(reason).slice(0, 40),
     detail: String(detail || '').slice(0, 500), status: 'open', resolution: null,
-    handledBy: null, createdAt: new Date(now).toISOString()
+    handledBy: null, createdAt: new Date(now).toISOString(),
+    ...(evidence ? { evidence } : {})
   });
   return ok('已提交举报，平台会核查');
 }
@@ -1213,7 +1351,8 @@ export function resolveReport(db, { reportId, action, reason = '' }, now = Date.
   const report = S.byId(db.reports, reportId);
   if (!report) return fail('not_found', '举报不存在');
   if (report.status !== 'open') return fail('closed', '这条举报已经处理过');
-  if (!reason.trim()) return fail('no_reason', '必须记录处理理由');
+  if (!String(reason || '').trim()) return fail('no_reason', '必须记录处理理由');
+  if (report.targetType === 'dm') return resolveDmReport(db, user, report, action, reason, now);
 
   const target = report.targetType === 'post'
     ? S.postOf(db, report.targetId)
@@ -1271,6 +1410,29 @@ export function resolveReport(db, { reportId, action, reason = '' }, now = Date.
       : `你的内容被处理（${reason}），如有异议可在站内申诉。`,
     createdAt: new Date(now).toISOString()
   });
+  return ok('已处理并记录审计');
+}
+
+/* 私信举报只有两种处理：删除这些私信，或者不处理。被举报人只在删除时收到提醒 */
+function resolveDmReport(db, user, report, action, reason, now) {
+  const stamp = new Date(now).toISOString();
+  if (action === 'remove') {
+    const ids = new Set((report.evidence || []).map((row) => row.id));
+    (db.directMessages || []).forEach((row) => {
+      if (ids.has(row.id)) Object.assign(row, { status: 'removed', removedAt: stamp });
+    });
+    report.status = 'removed';
+    notifyUser(db, {
+      userId: report.targetId, actorId: null, type: 'system', createdAt: stamp,
+      text: `你发送的部分私信因违反社区规范已被删除（${reason}）。`
+    });
+  } else if (action === 'dismiss') {
+    report.status = 'dismissed';
+  } else {
+    return fail('bad_action', '私信举报只能删除这些私信或不处理');
+  }
+  Object.assign(report, { resolution: reason, handledBy: user.id, handledAt: stamp });
+  audit(db, user.id, `私信举报处理：${action}`, `用户 ${report.targetId}`, reason);
   return ok('已处理并记录审计');
 }
 
@@ -1340,6 +1502,23 @@ export function createCircle(db, input = {}, now = Date.now()) {
   return ok('课友圈已创建', { circleId: circle.id, circle });
 }
 
+/** 管理员设置或取消圈内置顶；postId 为空表示取消 */
+export function setCirclePin(db, { circleId, postId = null }, now = Date.now()) {
+  const user = me(db);
+  if (!user || user.role !== 'admin') return fail('forbidden', '只有管理员可以设置置顶');
+  const circle = S.circleOf(db, circleId);
+  if (!circle) return fail('not_found', '圈不存在');
+  if (postId) {
+    const post = S.postOf(db, postId);
+    if (!S.isVisiblePost(post) || post.circleId !== circle.id) {
+      return fail('bad_post', '只能置顶这个圈里公开的帖子');
+    }
+  }
+  circle.pinnedPostId = postId || null;
+  audit(db, user.id, postId ? '设置圈内置顶' : '取消圈内置顶', `圈 ${circle.id}`, postId || '取消置顶');
+  return ok(postId ? '已置顶到课友圈' : '已取消置顶', { pinnedAt: new Date(now).toISOString() });
+}
+
 export function setPostStatus(db, { postId, status = 'banned', reason = '' }, now = Date.now()) {
   const user = me(db);
   if (!user || user.role !== 'admin') return fail('forbidden', '只有管理员可以封禁帖子');
@@ -1359,14 +1538,125 @@ export function setPostStatus(db, { postId, status = 'banned', reason = '' }, no
   return ok(next === 'banned' ? '已封禁该帖子，关联资料同时下架' : '已解封该帖子');
 }
 
+/* ---------- 拉黑 ---------- */
 
+export function setBlock(db, { userId, blocked = true }, now = Date.now()) {
+  const user = me(db);
+  if (!user) return fail('login', '请先登录');
+  const target = S.userOf(db, String(userId || ''));
+  if (!target || target.id === user.id) return fail('bad_user', '不能拉黑这个账号');
+  if (!Array.isArray(db.blocks)) db.blocks = [];
+  const existing = db.blocks.find((row) => row.blockerId === user.id && row.blockedId === target.id);
+  if (!blocked) {
+    if (!existing) return ok('没有拉黑这个账号', { blocked: false });
+    db.blocks = db.blocks.filter((row) => row !== existing);
+    return ok('已取消拉黑', { blocked: false });
+  }
+  if (existing) return ok('已经拉黑了', { blocked: true });
+  db.blocks.push({ blockerId: user.id, blockedId: target.id, createdAt: new Date(now).toISOString() });
+  // 拉黑后双方互相取消关注
+  db.follows = (db.follows || []).filter((row) => !(row.targetType === 'user'
+    && ((row.followerId === user.id && row.targetId === target.id) || (row.followerId === target.id && row.targetId === user.id))));
+  return ok('已拉黑：双方不能再互发私信，你也不会再收到对方的回复和页签提醒', { blocked: true });
+}
 
+/* ---------- 圈内成员管理 ---------- */
 
+const MEMBER_ACTIONS = ['mute', 'unmute', 'remove', 'restore'];
 
+/** 管理员在单个圈里禁言（可设天数）、解除禁言、移出成员或允许重新加入 */
+export function setMemberRestriction(db, { circleId, userId, action, days = null, reason = '' }, now = Date.now()) {
+  const user = me(db);
+  if (!user || user.role !== 'admin') return fail('forbidden', '只有管理员可以管理圈内成员');
+  if (!MEMBER_ACTIONS.includes(action)) return fail('bad_action', '未知的处理方式');
+  const circle = S.circleOf(db, circleId);
+  if (!circle) return fail('not_found', '圈不存在');
+  const target = S.userOf(db, String(userId || ''));
+  if (!target) return fail('not_found', '用户不存在');
+  if (target.role === 'admin') return fail('forbidden', '不能限制管理员');
+  const note = String(reason || '').trim();
+  if ((action === 'mute' || action === 'remove') && !note) return fail('no_reason', '需要写明理由，会通知对方');
+  const m = S.membership(db, target.id, circle.id);
+  const courseName = (S.courseOf(db, circle.courseId) || {}).name || '课程';
+  const stamp = new Date(now).toISOString();
+  let text = '';
+  let message = '';
 
+  if (action === 'mute') {
+    if (!m || m.status !== 'active') return fail('not_member', '对方不是这个圈的成员');
+    const span = Number(days);
+    m.writeRestricted = true;
+    m.restrictedUntil = span > 0 ? new Date(now + span * 24 * 3600 * 1000).toISOString() : null;
+    text = `你在「${courseName}」课友圈被禁言${span > 0 ? ` ${span} 天` : ''}：${note}`;
+    message = '已在本圈禁言';
+  } else if (action === 'unmute') {
+    if (!m || !m.writeRestricted) return fail('not_restricted', '对方没有被禁言');
+    m.writeRestricted = false;
+    m.restrictedUntil = null;
+    text = `你在「${courseName}」课友圈的禁言已解除。`;
+    message = '已解除禁言';
+  } else if (action === 'remove') {
+    if (!m || m.status !== 'active') return fail('not_member', '对方不是这个圈的成员');
+    Object.assign(m, { status: 'removed', removedAt: stamp, writeRestricted: false, restrictedUntil: null });
+    text = `你被移出「${courseName}」课友圈：${note}`;
+    message = '已移出本圈';
+  } else {
+    if (!m || m.status !== 'removed') return fail('not_removed', '对方没有被移出');
+    m.status = 'left';
+    text = `你可以重新加入「${courseName}」课友圈了。`;
+    message = '已允许重新加入';
+  }
+  audit(db, user.id, { mute: '圈内禁言', unmute: '解除圈内禁言', remove: '移出课友圈', restore: '允许重新加入' }[action],
+    `圈 ${circle.id} · 用户 ${target.id}`, note || '—');
+  notifyUser(db, { userId: target.id, actorId: null, type: 'system', createdAt: stamp, text });
+  return ok(message);
+}
 
+/* ---------- 注销账号 ---------- */
 
+/**
+ * 注销：删除个人资料与私人数据。发布过的内容按用户选择处理：
+ * anonymize = 保留但显示为“已注销用户”；delete = 永久移除帖子（沿用删帖规则：附件下架、赠签退回）和评论。
+ */
+export function deleteAccount(db, { mode, confirmText = '' }, now = Date.now()) {
+  const user = me(db);
+  if (!user) return fail('login', '请先登录');
+  if (user.role === 'admin') return fail('admin', '管理员账号不能在这里注销，请先移交管理权限');
+  if (!['anonymize', 'delete'].includes(mode)) return fail('bad_mode', '请选择怎么处理你发布过的内容');
+  if (String(confirmText).trim() !== '注销') return fail('need_confirm', '请输入“注销”两个字确认');
+  const stamp = new Date(now).toISOString();
+  const id = user.id;
 
+  if (mode === 'delete') {
+    (db.posts || []).filter((post) => post.authorId === id && post.status !== 'removed')
+      .forEach((post) => removePost(db, { postId: post.id, reason: '作者注销账号' }, now));
+    (db.comments || []).forEach((comment) => {
+      if (comment.authorId === id && comment.status !== 'removed') Object.assign(comment, { status: 'removed', removedAt: stamp });
+    });
+  }
 
+  db.directMessages = (db.directMessages || []).filter((row) => row.senderId !== id && row.recipientId !== id);
+  db.notifications = (db.notifications || []).filter((row) => row.userId !== id);
+  db.follows = (db.follows || []).filter((row) => row.followerId !== id && !(row.targetType === 'user' && row.targetId === id));
+  db.blocks = (db.blocks || []).filter((row) => row.blockerId !== id && row.blockedId !== id);
+  db.reactions = (db.reactions || []).filter((row) => row.userId !== id);
+  db.ledger = (db.ledger || []).filter((row) => row.userId !== id);
+  db.claims = (db.claims || []).filter((row) => row.userId !== id);
+  if (db.wallets) delete db.wallets[id];
+  if (db.drafts) delete db.drafts[id];
+  if (db.prefs) delete db.prefs[id];
+  (db.memberships || []).forEach((row) => {
+    if (row.userId === id && row.status === 'active') row.status = 'left';
+  });
+  (db.applications || []).forEach((row) => {
+    if (row.applicantId === id && row.state === 'pending') row.state = 'withdrawn';
+  });
 
+  Object.assign(user, {
+    email: '', nickname: '已注销用户', avatar: 'art/avatar-01.svg', bio: '',
+    status: 'deleted', verified: false, deletedAt: stamp
+  });
+  db.session = null;
+  return ok('账号已注销', { mode });
+}
 

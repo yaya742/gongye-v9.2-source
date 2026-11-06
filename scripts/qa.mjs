@@ -29,15 +29,15 @@ const CASES = [
   { name: 'home', hash: '#/', must: ['找资料', '全部资料'] },
   { name: 'resources', hash: '#/resources?q=数列极限', must: ['搜索', '查看预览'] },
   { name: 'resource-detail', hash: '#/resources/r_calc_notes', must: ['适用范围', '前两页预览', '资料讨论'] },
-  { name: 'circles', hash: '#/circles', must: ['我的课友圈', '可赠页签'] },
+  { name: 'circles', hash: '#/circles', must: ['我的课友圈', '每日 1 枚'] },
   { name: 'circle', hash: '#/circles/ci_calc_a', must: ['本周学习索引', '讨论'] },
-  { name: 'circle-physics', hash: '#/circles/ci_phys', must: ['课程圈', '加入这个课友圈'] },
+  { name: 'circle-physics', hash: '#/circles/ci_phys', must: ['关于这个圈', '加入这个课友圈'] },
   { name: 'post', hash: '#/posts/p_calc_notes', must: ['评论', '送页签'] },
-  { name: 'find-circles', hash: '#/find-circles', must: ['找到你正在上的课', '提交申请'] },
-  { name: 'invite', hash: '#/invite/GY-CALC-A26', must: ['登录后确认加入'] },
+  { name: 'find-circles', hash: '#/find-circles', must: ['找到你的课程圈', '申请建圈'] },
+  { name: 'invite', hash: '#/invite/GY-CALC', must: ['登录后确认加入'] },
   { name: 'login', hash: '#/login', must: ['登录共页', '发送验证码'] },
   { name: 'search', hash: '#/search?q=递归', must: ['仅看含附件'] },
-  { name: 'course', hash: '#/courses/c_calc', must: ['微积分Ⅰ', '当前学期的课友圈'] },
+  { name: 'course', hash: '#/courses/c_calc', must: ['微积分Ⅰ', '这门课的课友圈'] },
   { name: 'wallet-guest', hash: '#/me/wallet', must: ['我的页签'] },
   { name: 'admin-guest', hash: '#/admin', must: ['需要管理员权限'] },
   { name: 'notfound', hash: '#/no-such-page', must: ['这个页面不存在'] }
@@ -49,10 +49,10 @@ const LOGGED_IN_CASES = [
   { name: 'me-saved', hash: '#/me/saved', must: ['我的收藏'] },
   { name: 'me-settings', hash: '#/me/settings', must: ['通知', '退出登录'] },
   { name: 'profile', hash: '#/u/u_qinghe', must: ['橘子还没熟', '经验'] },
-  { name: 'compose', hash: '#/publish', must: ['发一篇学习帖子', '同时收录到找资料'] },
+  { name: 'compose', hash: '#/publish', must: ['发布帖子', '同时收录到找资料'] },
   { name: 'compose-resource', hash: '#/publish/resource', must: ['分享资料', '适用范围'] },
-  { name: 'circle-joined', hash: '#/circles/ci_calc_a', must: ['已加入', '静音'] },
-  { name: 'post-own', hash: '#/posts/p_calc_notes', must: ['编辑', '讨论'] }
+  { name: 'circle-joined', hash: '#/circles/ci_calc_a', must: ['已加入', '邀请课友'] },
+  { name: 'post-own', hash: '#/posts/p_calc_notes', must: ['讨论 ·', '送页签'] }
 ];
 
 const { WebSocket } = globalThis;

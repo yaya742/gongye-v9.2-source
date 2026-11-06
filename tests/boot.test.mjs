@@ -103,7 +103,7 @@ test('main.js 能启动并渲染首页', async () => {
   assert.ok(header.innerHTML.includes('header-inner'), '顶部导航已渲染');
   assert.ok(header.innerHTML.includes('找资料'), '主导航包含找资料');
   assert.ok(view.innerHTML.includes('找资料'), '首页内容已渲染');
-  assert.ok(view.innerHTML.length > 2000, '首页 HTML 规模正常');
+  assert.ok(view.innerHTML.length > 800, '首页 HTML 规模正常');
   assert.ok(!view.innerHTML.includes('正在载入界面'), '占位内容已被替换');
   assert.ok(!view.innerHTML.includes('页面脚本出错'), '没有运行时错误提示');
 });

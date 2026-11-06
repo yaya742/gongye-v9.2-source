@@ -110,18 +110,20 @@ const ROUTES = [
   ['search', {}, { q: '清', tab: 'users', attachments: '1' }],
   ['admin', {}, {}],
   ['about', {}, {}],
+  ['terms', {}, {}],
+  ['privacy', {}, {}],
   ['notFound', {}, {}]
 ];
 
 test('游客视角：所有页面都能渲染', () => {
-  const db = createSeed(NOW);
+  const db = createSeed(NOW, { keepDemoPosts: true });
   for (const [name, params, query] of ROUTES) {
     render(name, db, params, query);
   }
 });
 
 test('登录视角：所有页面都能渲染（含我的圈、页签、管理后台）', () => {
-  const db = createSeed(NOW);
+  const db = createSeed(NOW, { keepDemoPosts: true });
   db.session = { userId: 'u_qinghe' };
   for (const [name, params, query] of ROUTES) {
     render(name, db, params, query);
@@ -129,7 +131,7 @@ test('登录视角：所有页面都能渲染（含我的圈、页签、管理�
 });
 
 test('管理员视角：后台各页签都能渲染', () => {
-  const db = createSeed(NOW);
+  const db = createSeed(NOW, { keepDemoPosts: true });
   db.session = { userId: 'u_admin' };
   ['reports', 'circles', 'users', 'audit', 'stats'].forEach((tab) => {
     render('admin', db, {}, { tab });
@@ -137,7 +139,7 @@ test('管理员视角：后台各页签都能渲染', () => {
 });
 
 test('状态页面：处理中、未收录、已移除、归档、禁言都能渲染', () => {
-  const db = createSeed(NOW);
+  const db = createSeed(NOW, { keepDemoPosts: true });
   db.session = { userId: 'u_qinghe' };
 
   // 取消公开索引后，资料详情显示说明而不是下载
@@ -163,14 +165,14 @@ test('状态页面：处理中、未收录、已移除、归档、禁言都能�
   assert.ok(circleHtml.includes('已静音'));
 
   // 新建用户（无圈、无资料）的所有页面
-  const newbie = createSeed(NOW);
+  const newbie = createSeed(NOW, { keepDemoPosts: true });
   const login = actions.verifyCode(newbie, { email: 'fresh@example.com', code: actions.DEMO_CODE });
   assert.ok(login.ok);
   ['circles', 'compose', 'wallet', 'saved', 'messages'].forEach((name) => render(name, newbie));
 });
 
 test('9.1 渲染：资料卡课程 Tag、发布课程必填、找课搜索与分页', () => {
-  const db = createSeed(NOW);
+  const db = createSeed(NOW, { keepDemoPosts: true });
   actions.verifyCode(db, { email: 'student@example.com', code: actions.DEMO_CODE });
 
   const list = render('resources', db, {}, {});
@@ -188,6 +190,11 @@ test('9.1 渲染：资料卡课程 Tag、发布课程必填、找课搜索与分
   const find = render('findCircles', db, {}, { q: '微积分' });
   assert.match(find, /匹配到 \d+ 个课程圈/);
   assert.match(find, /id="find-q"/);
+  for (let index = 0; index < 25; index += 1) {
+    db.courses.push({ id: `c_fix${index}`, school: '示例大学', name: `分页测试课程${index}`, code: '', category: '测试' });
+    db.circles.push({ id: `ci_fix${index}`, courseId: `c_fix${index}`, status: 'active', inviteCode: `GY-FIX${index}`, createdAt: new Date(NOW).toISOString() });
+    db.memberships.push({ userId: 'u_qinghe', circleId: `ci_fix${index}`, status: 'active' });
+  }
   const findAll = render('findCircles', db, {}, {});
   assert.match(findAll, /第 1 \/ \d+ 页/);
   assert.match(findAll, /page=2/);

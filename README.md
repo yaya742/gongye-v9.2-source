@@ -207,6 +207,7 @@ app/
 | `#/me/saved` `#/me/messages` `#/me/wallet` `#/me/settings` | 收藏 / 消息 / 页签 / 设置 |
 | `#/login` | 邮箱验证码登录（演示固定码） |
 | `#/admin` | 管理后台（仅管理员） |
+| `#/terms` `#/privacy` | 用户协议、隐私政策 |
 
 路由用 hash 承载，静态托管无需任何服务端重写即可直达深层页面；如果托管平台配置了「未知路径回退 index.html」，`/resources/r_xxx` 这样的干净链接也能打开（首次进入后统一成 hash 形式）。详见 DEPLOY_HANDOFF 第 6 节。
 
@@ -271,7 +272,7 @@ node scripts/qa-pilot.mjs      # 试用后端验收：白名单注册 → 发帖
 ## 已知边界（请如实转达）
 
 - **没有服务端**：登录态、权限、页签余额与退款、文件扫描都是浏览器内的演示实现，任何人打开开发者工具都能改本机数据。它不能当作真实社区上线。
-- **文件是占位的**：`assets/samples/*.pdf` 是明确标注的示例 PDF；资料预览是 `docs/make-assets.py` 生成的演示 SVG，不是真实 PDF 渲染结果。
+- **演示版的文件是占位的**：`assets/samples/*.pdf` 是明确标注的示例 PDF；资料预览是 `docs/make-assets.py` 生成的演示 SVG。试用后端支持真实 PDF 与图片上传并生成预览；配置 ClamAV 后会扫描每个文件，见 [PILOT.md](PILOT.md)。
 - **数据只在本机**：换设备、清缓存、换浏览器都会重置。
 - **真实上线需要**：邮箱验证码服务、PostgreSQL/云数据库、S3 兼容私有对象存储、文件扫描与 PDF 前两页转图、后台任务（退款/通知）、服务端事务与幂等、限流与审计。清单见 DEPLOY_HANDOFF 第 13 节。
 

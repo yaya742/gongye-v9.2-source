@@ -114,6 +114,13 @@ export function profile(ctx) {
     })}</div>`;
   }
 
+  if (user.status === 'deleted') {
+    return `<div class="layout-1">${emptyState({
+      img: 'removed.svg', title: '这个账号已注销', text: '账号资料已经删除；作者选择保留的内容会显示为“已注销用户”。',
+      actions: `<a class="btn btn-sm" href="${href('/circles')}">回到课友圈</a>`
+    })}</div>`;
+  }
+
   const isMe = !!me && me.id === user.id;
   const level = S.levelInfo(db, user.id);
   const posts = S.postsByAuthor(db, user.id);
@@ -121,6 +128,7 @@ export function profile(ctx) {
   const received = S.receivedGiftTotal(db, user.id);
   const following = me ? S.isFollowing(db, me.id, 'user', user.id) : false;
   const showCircles = ctx.config?.mode !== 'production' || isMe;
+  const blockedByMe = !!me && S.blockedBy(db, me.id, user.id);
   const circles = showCircles ? S.myCircles(db, user.id) : [];
 
   return `
@@ -138,7 +146,7 @@ export function profile(ctx) {
               ${user.role === 'admin' ? '<span class="status-pill">站点维护</span>' : ''}
             </div>
             <p class="small secondary mt-2">${esc(user.bio || '还没有写简介。')}</p>
-            <p class="tiny muted mt-2">加入于 ${esc(formatDay(user.joinedAt))} · 自述学校并非认证信息，页面不展示修课清单</p>
+            <p class="tiny muted mt-2">加入于 ${esc(formatDay(user.joinedAt))}</p>
           </div>
         </div>
         ${statRow([
@@ -155,11 +163,18 @@ export function profile(ctx) {
             : `<button class="btn btn-sm" type="button" data-action="follow-user" data-user="${esc(user.id)}">
                  ${following ? '已关注' : '关注作者'}
                </button>
-               <a class="btn btn-ghost btn-sm" href="${href('/me/messages')}">消息</a>`}
-        </div>
+               ${me
+                 ? `<button class="btn btn-ghost btn-sm" type="button" data-action="open-direct-thread" data-peer="${esc(user.id)}">私信</button>
+                    <details class="more-menu">
+                      <summary class="icon-btn" aria-label="更多操作">${icon('more')}</summary>
+                      <div class="more-menu-panel">
+                        <button type="button" data-action="block-user" data-user="${esc(user.id)}" data-value="${blockedByMe ? '0' : '1'}">${blockedByMe ? '取消拉黑' : '拉黑'}</button>
+                      </div>
+                    </details>`
+                 : `<a class="btn btn-ghost btn-sm" href="${href('/login', { next: `/me/messages?tab=direct&with=${encodeURIComponent(user.id)}` })}">        </div>
       </div>
 
-      <div class="tabs"><a class="tab" role="tab" aria-selected="true" href="${href(`/u/${user.id}`)}">帖子 ${posts.length}</a></div>
+      <h2 class="section-heading">帖子 ${posts.length}</h2>
       ${posts.length
         ? posts.map((post) => postCard(ctx, post)).join('')
         : `<div class="card">${emptyState({
@@ -254,24 +269,137 @@ export function messages(ctx) {
       <a class="btn mt-4" href="${href('/login', { next: '/me/messages' })}">登录 / 注册</a>
     </div></div>`;
   }
-  const tab = ['all', 'reply', 'gift', 'system'].includes(route.query.tab) ? route.query.tab : 'all';
+  const tab = route.query.tab || 'all';
+  const isDirect = tab === 'direct';
+  const noticeTab = ['all', 'reply', 'gift', 'system'].includes(tab) ? tab : 'all';
   const all = S.notificationsFor(db, me.id);
   const unread = all.filter((n) => !n.readAt).length;
   const items = tab === 'all'
     ? all
-    : all.filter((n) => (tab === 'system' ? ['system', 'refund', 'accepted'].includes(n.type) : n.type === tab));
+    : all.filter((n) => (noticeTab === 'system' ? ['system', 'refund', 'accepted'].includes(n.type) : n.type === noticeTab));
+
+  let directContent = '';
+  if (isDirect) {
+    const peerId = String(route.query.with || '');
+    if (peerId) {
+      const peer = S.userOf(db, peerId);
+      if (!peer || peer.id === me.id || peer.status !== 'active') {
+        directContent = `<div class="card">${emptyState({
+          img: 'removed.svg', title: '无法打开这段对话', text: '对方账号不存在或当前不可用。',
+          actions: `<a class="btn btn-sm" href="${href('/me/messages', { tab: 'direct' })}">返回私信</a>`
+        })}</div>`;
+      } else {
+        const thread = directMessages
+          .filter((message) => (message.senderId === me.id && message.recipientId === peer.id)
+            || (message.senderId === peer.id && message.recipientId === me.id))
+          .slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        const previousList = document.querySelector('.dm-message-list');
+        const wasAtBottom = !previousList
+          || previousList.scrollHeight - previousList.scrollTop - previousList.clientHeight < 80;
+        const unreadInThread = thread.some((message) => message.senderId === peer.id
+          && message.recipientId === me.id && !message.readAt);
+        const blockedPeer = S.blockedBy(db, me.id, peer.id);
+        directContent = `
+          <section class="card dm-thread">
+            <div class="row dm-thread-head">
+              <a class="link" href="${href('/me/messages', { tab: 'direct' })}">‹ 私信列表</a>
+              <span class="grow"></span>
+              <details class="more-menu">
+                <summary class="icon-btn" aria-label="更多操作">${icon('more')}</summary>
+                <div class="more-menu-panel">
+                  <button type="button" data-action="report-dm" data-peer="${esc(peer.id)}">举报对方</button>
+                  <button type="button" data-action="block-user" data-user="${esc(peer.id)}" data-value="${blockedPeer ? '0' : '1'}">${blockedPeer ? '取消拉黑' : '拉黑'}</button>
+                </div>
+              </details>
+              ${unreadInThread ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-direct-read" data-peer="${esc(peer.id)}">标为已读</button>` : ''}
+            </div>
+            <div class="author dm-peer">${avatar(peer)}<div class="grow"><b>${esc(peer.nickname)}</b></div>
+              <a class="link small" href="${href(`/u/${peer.id}`)}">查看主页</a>
+            </div>
+            <div class="dm-message-list">
+              ${thread.length ? thread.map((message) => {
+                const mine = message.senderId === me.id;
+                return `<div class="dm-message-row ${mine ? 'is-mine' : ''}">
+                  <div class="dm-message-meta">${mine ? '我' : esc(peer.nickname)} · ${esc(formatDateTime(message.createdAt))}</div>
+                  ${message.status === 'removed'
+                    ? '<div class="dm-bubble is-removed">这条私信已被删除</div>'
+                    : `<div class="dm-bubble">${esc(message.body).replace(/\n/g, '<br>')}</div>`}
+                  ${mine && message.readAt ? '<div class="dm-read-state">已读</div>' : ''}
+                </div>`;
+              }).join('') : '<p class="tiny muted dm-empty-thread">还没有消息，可以从课程问题开始聊。</p>'}
+              <div id="dm-thread-end"></div>
+            </div>
+            ${blockedPeer ? `<div class="dm-compose"><div class="notice notice-warn"><span>你已拉黑对方，双方都不能发私信。</span>
+              <button class="text-button" type="button" data-action="block-user" data-user="${esc(peer.id)}" data-value="0">取消拉黑</button></div></div>` : `
+            <form class="dm-compose" data-form="direct-message" data-recipient="${esc(peer.id)}">
+              <label class="visually-hidden" for="dm-body">私信内容</label>
+              <textarea class="textarea" id="dm-body" name="body" rows="3" maxlength="2000" required
+                placeholder="写一条私信……"></textarea>
+              <div class="row wrap dm-compose-foot">
+                <span class="tiny muted">最多 2000 字</span>
+                <button class="btn btn-sm" type="submit">发送</button>
+              </div>
+            </form>`}
+          </section>`;
+        ctx.after.push(() => {
+          const list = document.querySelector('.dm-message-list');
+          if (list && wasAtBottom) list.scrollTop = list.scrollHeight;
+        });
+      }
+    } else {
+      const conversations = new Map();
+      directMessages.forEach((message) => {
+        const peerIdForMessage = message.senderId === me.id ? message.recipientId : message.senderId;
+        const previous = conversations.get(peerIdForMessage);
+        if (!previous || new Date(message.createdAt) > new Date(previous.last.createdAt)) {
+          conversations.set(peerIdForMessage, { last: message });
+        }
+      });
+      const sortedConversations = [...conversations.entries()]
+        .map(([peerIdForMessage, row]) => ({ peer: S.userOf(db, peerIdForMessage), ...row }))
+        .filter((row) => row.peer && row.peer.status === 'active')
+        .sort((a, b) => new Date(b.last.createdAt) - new Date(a.last.createdAt));
+      directContent = sortedConversations.length
+        ? `<div class="card card-flush"><ul class="list-plain dm-conversations">
+            ${sortedConversations.map(({ peer, last }) => {
+              const unreadCount = directMessages.filter((message) => message.senderId === peer.id
+                && message.recipientId === me.id && !message.readAt).length;
+              return `<li><button class="dm-conversation" type="button" data-action="open-direct-thread" data-peer="${esc(peer.id)}">
+                ${avatar(peer)}<span class="grow dm-conversation-copy"><b>${esc(peer.nickname)}</b>
+                  <span>${last.senderId === me.id ? '我：' : ''}${last.status === 'removed' ? '[已删除的私信]' : esc(last.body)}</span></span>
+                <span class="dm-conversation-end"><time>${esc(timeAgo(last.createdAt))}</time>
+                  ${unreadCount ? `<i class="dm-unread" aria-label="${unreadCount} 条未读">${unreadCount > 99 ? '99+' : unreadCount}</i>` : ''}</span>
+              </button></li>`;
+            }).join('')}
+          </ul></div>`
+        : `<div class="card">${emptyState({
+          img: 'empty-feed.svg', title: '还没有私信',
+          text: '打开同学主页，点击“私信”即可开始一段对话。',
+          actions: `<a class="btn btn-sm" href="${href('/circles', { mode: 'discover' })}">去课友圈认识同学</a>`
+        })}</div>`;
+    }
+  }
 
   return `
   <div class="layout-1">
     <nav class="crumbs" aria-label="面包屑"><a href="${href(`/u/${me.id}`)}">我的主页</a><span>/</span><span>消息</span></nav>
     <div class="page-head">
       <h1>消息</h1>
-      <p>${unread ? `${unread} 条未读` : '全部已读'} · 自己的操作不会通知自己</p>
+      <p>${isDirect ? `${directUnread ? `${directUnread} 条未读私信` : '查看你的私信对话'}` : (unread ? `${unread} 条未读通知` : '通知已读完')}</p>
     </div>
 
-    <div class="tabs" role="tablist">
-      ${['all', 'reply', 'gift', 'system'].map((key) => `<a class="tab" role="tab"
-        aria-selected="${tab === key}" href="${href('/me/messages', { tab: key === 'all' ? '' : key })}">
+    <div class="tabs">
+      <a class="tab" aria-current="${!isDirect ? 'page' : 'false'}" href="${href('/me/messages')}">通知${unread ? ` · ${unread}` : ''}</a>
+      <a class="tab" aria-current="${isDirect ? 'page' : 'false'}" href="${href('/me/messages', { tab: 'direct' })}">私信${directUnread ? ` · ${directUnread}` : ''}</a>
+      ${isDirect ? `<button class="icon-btn direct-help" type="button" data-action="direct-mode-info" aria-label="私信说明">${icon('question')}</button>` : ''}
+      <span class="grow"></span>
+      ${!isDirect && unread ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-all-read">全部标为已读</button>` : ''}
+    </div>
+
+    ${isDirect ? directContent : `
+    <div class="chips mb-3">
+      ${['all', 'reply', 'gift', 'system'].map((key) => `<a class="chip chip-sm ${noticeTab === key ? 'is-active' : ''}"
+        href="${href('/me/messages', { tab: key === 'all' ? '' : key })}">
         ${key === 'all' ? '全部' : key === 'reply' ? '回复' : key === 'gift' ? '页签' : '系统'}
       </a>`).join('')}
       <span class="grow"></span>
@@ -292,11 +420,12 @@ export function messages(ctx) {
                   <span class="status-pill ${n.readAt ? '' : 'status-ready'}">${n.readAt ? NOTIFY_TYPES[n.type] || '通知' : '未读'}</span>
                 </div>
                 <div class="small mt-1">${esc(n.text)}</div>
-                <div class="tiny muted mt-1">${esc(formatDateTime(n.createdAt))}
-                  ${target ? ` · <a class="link" href="${href(`/posts/${target.id}`)}">打开相关帖子</a>` : ''}
+                <div class="notification-meta">
+                  <span>${esc(formatDateTime(n.createdAt))}</span>
+                  ${target ? `<a class="link" href="${href(`/posts/${target.id}`)}" ${n.readAt ? '' : `data-action="open-notification" data-notification="${esc(n.id)}" data-href="/posts/${esc(target.id)}"`}>打开相关帖子</a>` : ''}
+                  ${!n.readAt ? `<button class="text-button" type="button" data-action="mark-read" data-notification="${esc(n.id)}">标为已读</button>` : ''}
                 </div>
               </div>
-              ${!n.readAt ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-read" data-notification="${esc(n.id)}">标为已读</button>` : ''}
             </div>
           </li>`;
         }).join('')}
@@ -353,25 +482,12 @@ export function wallet(ctx) {
         </div>
         <p class="small secondary">今天的页签，想留给哪篇帮到你的分享？</p>
         <div class="mt-3">${claimBlock}</div>
-        ${state.code === 'claimed' ? '' : ''}
-      </div>
-
-      <div class="card">
-        <div class="card-title">规则</div>
-        <div class="stack small secondary">
-          <p>· 每个上海自然日可手动领取 1 枚；未领取不补发，无连续签到要求</p>
-          <p>· 可送余额可累积到 30 枚；满额时须送出后才可再领</p>
-          <p>· 每帖最多 2 枚，每位作者每天最多收你 2 枚，每天最多送出 5 枚</p>
-          <p>· 不能自赠；收到页签只计入作者认可，不进入可送余额，不可转赠</p>
-          <p>· 赠送成功不可主动撤回；帖子被永久移除时按记录退回，退款可让余额短时超过 30</p>
-          <p>· 页签不可购买、提现、私下转账，也不抵扣下载</p>
-        </div>
       </div>
 
       <div class="card">
         <div class="card-title">收支记录</div>
-        ${entries.length ? `<table class="table">
-          <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>变动后余额</th></tr></thead>
+        ${entries.length ? `<table class="table ledger-table">
+          <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th></tr></thead>
           <tbody>
             ${entries.map((e) => `<tr>
               <td>${esc(formatDateTime(e.at))}</td>
@@ -381,7 +497,6 @@ export function wallet(ctx) {
             </tr>`).join('')}
           </tbody>
         </table>` : '<p class="small muted">还没有记录。</p>'}
-        <p class="tiny muted mt-3">真实余额只由服务端事务写入；页面显示的余额来自服务端结果，不做乐观更新。</p>
       </div>
 
       ${giftsSent.length ? `<div class="card">
@@ -398,6 +513,18 @@ export function wallet(ctx) {
           }).join('')}
         </div>
       </div>` : ''}
+
+      <details class="card circle-help">
+        <summary>页签规则</summary>
+        <div class="stack small secondary mt-3">
+          <p>· 每个上海自然日可手动领取 1 枚；未领取不补发，无连续签到要求</p>
+          <p>· 可送余额可累积到 30 枚；满额时须送出后才可再领</p>
+          <p>· 每帖最多 2 枚，每位作者每天最多收你 2 枚，每天最多送出 5 枚</p>
+          <p>· 不能自赠；收到页签只计入作者认可，不进入可送余额，不可转赠</p>
+          <p>· 赠送成功不可主动撤回；帖子被永久移除时按记录退回，退款可让余额短时超过 30</p>
+          <p>· 页签不可购买、提现、私下转账，也不抵扣下载</p>
+        </div>
+      </details>
     </main>
 
     <aside class="rail">
@@ -409,10 +536,6 @@ export function wallet(ctx) {
           <p>领取状态：<b>${state.code === 'claimed' ? '今日已领取' : state.canClaim ? '可领取' : '不可领取'}</b></p>
         </div>
         <p class="tiny muted mt-3">收到页签不进入可送余额，也不能转赠。</p>
-      </section>
-      <section class="card">
-        <div class="card-title">页面说明</div>
-        <p class="small secondary">页签是辅助机制，不替代找资料与课友圈两个核心。它不决定推荐，不设全站财富排行，也不以连续登录惩罚用户。</p>
       </section>
     </aside>
   </div>`;
@@ -430,6 +553,8 @@ export function settings(ctx) {
     </div></div>`;
   }
   const prefs = (db.prefs && db.prefs[me.id]) || { replies: true, gifts: true, system: true };
+  const blocked = (db.blocks || []).filter((row) => row.blockerId === me.id)
+    .map((row) => ({ user: S.userOf(db, row.blockedId) })).filter((row) => row.user);
 
   return `
   <div class="layout-1">
@@ -459,7 +584,7 @@ export function settings(ctx) {
         </div>
         <div class="field">
           <label for="set-bio">简介 <span class="label-hint">最多 120 字</span></label>
-          <textarea class="textarea" id="set-bio" name="bio" rows="2" maxlength="120">${esc(me.bio || '')}</textarea>
+          <textarea class="textarea textarea-sm" id="set-bio" name="bio" rows="2" maxlength="120">${esc(me.bio || '')}</textarea>
         </div>
         <button class="btn" type="submit">保存资料</button>
       </form>
@@ -472,26 +597,43 @@ export function settings(ctx) {
           <span>有人回复我的帖子或评论时通知我</span></label>
         <label class="checkbox mb-2"><input type="checkbox" name="gifts" ${prefs.gifts !== false ? 'checked' : ''}>
           <span>收到页签时通知我（同一帖的赠签可合并）</span></label>
-        <label class="checkbox mb-2"><input type="checkbox" name="system" ${prefs.system !== false ? 'checked' : ''}>
-          <span>系统通知：资料审核结果、举报处理、退款</span></label>
-        <p class="field-help">系统通知不可关闭；首版不做私信、邮件营销和浏览器推送。</p>
+        <label class="checkbox mb-2"><input type="checkbox" checked disabled>
+          <span>系统通知：采纳、审核结果、举报处理、退款（不能关闭）</span></label>
+        <p class="field-help">只有站内通知，没有邮件营销和浏览器推送。</p>
         <button class="btn btn-ghost" type="submit">保存设置</button>
       </form>
     </div>
 
     <div class="card">
-      <div class="card-title">账号与隐私</div>
-      <div class="stack small secondary">
-        <p>· 邮箱验证只证明你控制这个邮箱，学校与修课信息属于自述，不是学籍认证。</p>
-        <p>· 页面不会公开你的修课清单、学号、课表或上课地点；成员名单也不公开。</p>
-        <p>· 演示数据保存在本机浏览器（localStorage），清除浏览器数据即可移除。</p>
+      <div class="card-title">账号与数据</div>
+      <div class="settings-rows">
+        <div class="settings-row">
+          <div class="grow"><b>导出我的数据</b><p class="tiny muted">下载一份文件，包含你的资料、发布内容、私信和各项记录。</p></div>
+          <button class="btn btn-ghost btn-sm" type="button" data-action="export-my-data">导出</button>
+        </div>
+        <div class="settings-row">
+          <div class="grow"><b>已拉黑的账号</b>
+            ${blocked.length ? `<ul class="list-plain blocked-list">${blocked.map(({ user }) => `<li class="row">
+                ${avatar(user, 'avatar-xs')}<span class="grow small">${esc(user.nickname)}</span>
+                <button class="text-button" type="button" data-action="block-user" data-user="${esc(user.id)}" data-value="0">取消拉黑</button>
+              </li>`).join('')}</ul>` : '<p class="tiny muted">没有拉黑任何人。在对方主页或私信里可以拉黑。</p>'}
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="grow"><b>注销账号</b><p class="tiny muted">${me.role === 'admin'
+            ? '管理员账号不能在这里注销，请先移交管理权限。'
+            : '删除个人资料和私信等数据，发布过的内容可以选择保留或删除，无法恢复。'}</p></div>
+          ${me.role === 'admin' ? '' : '<button class="btn btn-danger btn-sm" type="button" data-action="open-delete-account">注销</button>'}
+        </div>
       </div>
-      <div class="row wrap mt-4">
-        <button class="btn btn-ghost btn-sm" type="button" data-action="logout">退出登录</button>
-        ${ctx.config && ctx.config.mode === 'production'
-          ? ''
-          : '<button class="btn btn-danger btn-sm" type="button" data-action="reset-demo">重置演示数据</button>'}
-      </div>
+      <p class="tiny muted mt-3">我们如何处理你的数据：<a class="link" href="${href('/privacy')}">隐私政策</a> · <a class="link" href="${href('/terms')}">用户协议</a></p>
+    </div>
+
+    <div class="row wrap mt-4">
+      <button class="btn btn-ghost btn-sm" type="button" data-action="logout">退出登录</button>
+      ${ctx.config && ctx.config.mode === 'production'
+        ? ''
+        : '<button class="btn btn-danger btn-sm" type="button" data-action="reset-demo">重置演示数据</button>'}
     </div>
   </div>`;
 }
