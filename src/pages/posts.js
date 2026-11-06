@@ -2,9 +2,10 @@
 
 import { href } from '../router.js';
 import * as S from '../state/selectors.js';
+import { DEMO_SAMPLE_FILES } from '../state/actions.js';
 import {
   postCard, postActions, emptyState, notice, icon, avatar, authorLine,
-  attachmentRow, commentList, commentForm, publishSwitch, pdfPicker
+  attachmentRow, commentList, commentForm, publishSwitch, pdfPicker, pdfUploadField, sourceRightsFields
 } from '../components/ui.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { stickerMarkup } from '../data/stickers.js';
@@ -200,6 +201,8 @@ export function compose(ctx) {
   const myCircles = S.myCircles(db, me.id).filter(({ circle }) => circle.status === 'active');
   const presetCircle = route.query.circle || (draft && draft.circleId) || '';
   const files = ui.files || [];
+  const production = ctx.config?.mode === 'production';
+  const uploadHtml = pdfUploadField(ctx, { samples: DEMO_SAMPLE_FILES });
   const images = ui.images || [];
   const imageLimitLabel = ctx.config && ctx.config.mode === 'production'
     ? '照片会自动压缩' : '压缩后合计 ≤ 800 KiB';
@@ -289,14 +292,14 @@ export function compose(ctx) {
         </div>
 
         <div class="field">
-          <div class="compose-tools">
+          ${production ? '<p class="field-help">图片上传尚未开放，已禁用；请用文字描述或上传 PDF，不接受本地 blob / base64 图片。</p>' : `<div class="compose-tools">
             <label class="btn btn-ghost btn-sm upload-button">
               ${icon('image', 'i-sm')}添加图片
               <input class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple data-upload="image">
             </label>
             <span class="tiny muted">最多 9 张 · ${imageLimitLabel}</span>
             ${ui.pendingImages ? `<span class="tiny muted">正在处理 ${ui.pendingImages} 张…</span>` : ''}
-          </div>
+          </div>`}
           ${images.length ? `<div class="compose-images">
             ${images.map((img, index) => `<div class="compose-image">
               <img src="${esc(img.dataUrl)}" alt="${esc(img.name)}">
@@ -312,7 +315,10 @@ export function compose(ctx) {
 
         <details class="compose-more" ${files.length ? 'open' : ''}>
           <summary>添加 PDF 附件${files.length ? `（${files.length}）` : ''}</summary>
-          <div class="mt-3">${pdfPicker(ctx, files)}</div>
+          <div class="mt-3">
+            ${production ? uploadHtml : pdfPicker(ctx, files)}
+            ${sourceRightsFields({ prefix: 'post-resource' })}
+          </div>
         </details>
 
         <details class="compose-more">
@@ -369,7 +375,7 @@ export function compose(ctx) {
 
         <div class="row mt-4 wrap form-submit">
           <span class="tiny muted grow">没发出去的内容会暂存在这台设备</span>
-          <button class="btn" type="submit">${icon('plus', 'i-sm')}发布帖子</button>
+          <button class="btn" type="submit" ${ui.uploading ? 'disabled' : ''}>${icon('plus', 'i-sm')}发布帖子</button>
         </div>
       </form>
     </div>

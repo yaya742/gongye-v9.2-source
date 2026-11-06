@@ -25,7 +25,7 @@ const { api, auth } = await import('../src/api/client.js');
 const mainSource = await readFile(new URL('../src/main.js', import.meta.url), 'utf8');
 
 function ctxFor(name = 'login', loggedIn = false, patch = {}) {
-  const db = createSeed(Date.UTC(2026, 10, 2));
+  const db = createSeed(Date.UTC(2026, 10, 2), { keepDemoPosts: true });
   if (loggedIn) db.session = { userId: 'u_qinghe' };
   return {
     db, me: loggedIn ? S.userOf(db, 'u_qinghe') : null,
@@ -322,6 +322,7 @@ test('submitPost includes selected term, chapter and real upload references', as
   const ui = { compose: { board: 'help' }, files: [{ uploadId: 'up_1' }], images: [] };
   const submit = mainFunction('submitPost', {
     FormData: FormFields, ui, isRemote: true, ctx: { db: {} },
+    pendingImageCount: 0, filesUploading: () => false,
     S: { courseOf: (_, id) => ({ id }) }, validatePublication: () => '', toast() {},
     publicationAttachments: () => [{ uploadId: 'up_1' }],
     async publishContent(value) { payload = value; return { ok: false }; }

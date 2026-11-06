@@ -528,17 +528,33 @@ export function notFound(ctx) {
 }
 
 export function about(ctx) {
-  return `<div class="layout-1"><div class="card">
-    <h1>关于共页</h1>
-    <p class="small secondary mt-3">共页是面向大学生的学习社区：找资料负责引流，课友圈负责留存，两者并列，共享课程、作者、帖子与附件。</p>
-    <p class="small secondary mt-2">${ctx.config && ctx.config.mode === 'production'
-      ? '当前是内部试用版：账号和数据保存在试用服务端；已发布帖子、资料及圈内公开内容任何访问者都可浏览，登录资格不提供内容保密。可以上传真实 PDF 和图片，上传时检查文件类型，但还没有接入病毒扫描。'
-      : '当前是静态演示版：没有真实账号、服务端或文件上传与扫描。所有内容与数字均为示例；操作只保存在当前浏览器，不会同步给其他访问者。样例中的公开内容仍可被任何访客浏览。'}</p>
-    <div class="row mt-4 wrap">
-      <a class="btn btn-sm" href="${href('/')}">找资料</a>
-      <a class="btn btn-ghost btn-sm" href="${href('/circles')}">课友圈</a>
-    </div>
-  </div></div>`;
+  const production = ctx.config && ctx.config.mode === 'production';
+  const contact = String((ctx.config && ctx.config.supportEmail) || '');
+  const contactReady = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(contact);
+  return `<div class="layout-1">
+    <section class="card"><h1>共页 · 社区规则与隐私说明</h1>
+      <p class="small secondary mt-3">面向浙大全校课程的学生学习互助社区。共页不是浙江大学官方教学或考试平台，邮箱验证仅确认邮箱所有权，不证明当前修课、学生身份或学校背书。</p>
+      <p class="small secondary mt-2">${production ? '当前为服务端共享版本；邮件、文件扫描和存储是否就绪以实际配置为准，未配置时不会伪装发送邮件或放行文件。' : '当前为独立静态演示，账号、资料和数字为示例，请勿输入真实隐私信息。'}</p>
+      <div class="row mt-4 wrap"><a class="btn btn-sm" href="${href('/resources')}">找资料</a><a class="btn btn-ghost btn-sm" href="${href('/find-circles')}">查找全校课程圈</a></div>
+    </section>
+    <section class="card"><h2>如何贡献与使用资料</h2><div class="stack small secondary mt-3">
+      <p>一门课一个圈，跨学期积累。标明学期、章节、教材、适用范围与未覆盖内容；不同教师和学期的考核要求可能不同。资料仅供参考，欢迎在原帖提出具体纠错。</p>
+      <p>仅上传原创、得到授权或按公开许可可再分享的材料，并注明作者、来源及许可依据。勾选确认不代表平台已核实版权；公开可见不等于允许复制传播。</p>
+      <p>禁止上传未经允许的教材扫描件、教师课件、个人信息、未公开试卷、进行中考试答案及代写代考内容。不得将社区用于作弊；对历史试题也须确认分享权利及学校规定。</p>
+      <p>附件通过技术检查后才可发布。扫描不保证绝对安全或内容准确；请勿在不可信文档中输入账号密码。前两页预览可公开浏览，完整下载须验证邮箱；公开帖子可能被搜索引擎收录。</p>
+    </div></section>
+    <section class="card"><h2>隐私与账号</h2><div class="stack small secondary mt-3">
+      <p>为登录保存邮箱、验证状态与会话；资料、帖子、评论、昵称和简介按公开内容处理。邮箱及个人入圈、收藏、关注清单不向其他普通用户公开；管理员因审核和运维可访问必要数据。</p>
+      <p>验证码通过配置的邮件服务发送，会涉及邮件服务商处理；短期保存限流所需的邮箱和网络标识。会话以 HttpOnly Cookie 保存。请勿在公开内容中填写学号、完整课表、手机号或他人隐私。</p>
+      <p>可退出/静音课程圈、取消资料索引或删除自己的帖子。取消索引不会撤回已公开原帖或他人已下载的副本；删除和下架会立即关闭本站附件入口，备份可能在运维保留周期内存在。</p>
+      <p>邮箱更改、数据副本、账号注销或隐私投诉请联系维护者核实处理；当前不提供自动注销，也不承诺能够撤回外部转载。</p>
+    </div></section>
+    <section class="card"><h2>举报、版权投诉与申诉</h2><div class="stack small secondary mt-3">
+      <p>登录后可通过帖子/评论上的举报入口提交位置、问题及证据。权利人请提供原作品、权属或授权证据、涉事链接与可回复方式，维护者核实后可隐藏、永久移除或恢复，并记录处理理由。</p>
+      <p>${contactReady ? `无需登录的投诉、申诉与隐私联系：<a class="link" href="mailto:${esc(contact)}">${esc(contact)}</a>。` : '运营方尚未配置无需登录的投诉邮箱。正式公开前必须补齐可用联系方式；现阶段可通过部署方已有渠道反馈。'}</p>
+      <p>课程目录缺失或名称错误也可向维护者反馈。课程圈申请不会赋予申请者管理权，学生之间可平等贡献和纠错。</p>
+    </div></section>
+  </div>`;
 }
 
 

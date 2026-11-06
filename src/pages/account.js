@@ -171,7 +171,8 @@ export function profile(ctx) {
                         <button type="button" data-action="block-user" data-user="${esc(user.id)}" data-value="${blockedByMe ? '0' : '1'}">${blockedByMe ? '取消拉黑' : '拉黑'}</button>
                       </div>
                     </details>`
-                 : `<a class="btn btn-ghost btn-sm" href="${href('/login', { next: `/me/messages?tab=direct&with=${encodeURIComponent(user.id)}` })}">        </div>
+                 : `<a class="btn btn-ghost btn-sm" href="${href('/login', { next: `/me/messages?tab=direct&with=${encodeURIComponent(user.id)}` })}">登录后私信</a>`}`}
+        </div>
       </div>
 
       <h2 class="section-heading">帖子 ${posts.length}</h2>
@@ -274,7 +275,10 @@ export function messages(ctx) {
   const noticeTab = ['all', 'reply', 'gift', 'system'].includes(tab) ? tab : 'all';
   const all = S.notificationsFor(db, me.id);
   const unread = all.filter((n) => !n.readAt).length;
-  const items = tab === 'all'
+  const directMessages = (db.directMessages || [])
+    .filter((message) => message.senderId === me.id || message.recipientId === me.id);
+  const directUnread = directMessages.filter((message) => message.recipientId === me.id && !message.readAt).length;
+  const items = noticeTab === 'all'
     ? all
     : all.filter((n) => (noticeTab === 'system' ? ['system', 'refund', 'accepted'].includes(n.type) : n.type === noticeTab));
 
@@ -436,6 +440,7 @@ export function messages(ctx) {
       text: '别人回复你的帖子、采纳你的回答或给你送页签时，会在这里提醒。',
       actions: `<a class="btn btn-sm" href="${href('/circles')}">去课友圈看看</a>`
     })}</div>`}
+    `}
 
     <p class="tiny muted mt-4">首版只有站内消息：不做私信、邮件营销或浏览器推送。圈内动态用轻量提示，不逐帖群发；归档与静音圈不制造红点焦虑。</p>
   </div>`;

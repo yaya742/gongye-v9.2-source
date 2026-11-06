@@ -497,7 +497,9 @@ export function publicState(db, meId, system = null) {
   const resources = (db.resources || []).filter((resource) => postIds.has(resource.postId)
     && (resource.indexEnabled !== false || (posts.find((post) => post.id === resource.postId) || {}).authorId === meId));
   // 成员名单不公开；管理员需要名单来做圈内禁言和移出
-  const activeOtherMemberships = isAdmin
+  const activeOtherMemberships = !meId
+    ? []
+    : isAdmin
     ? (db.memberships || []).map((row) => pickFields(row, [
       'userId', 'circleId', 'status', 'muted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted', 'restrictedUntil'
     ]))
@@ -664,6 +666,10 @@ const clearCookieHeader = (secure) => {
 
 /* ---------- 静态文件 ---------- */
 
+/* 静态服务只放开站点本身：源码、测试、部署配置不对外 */
+const PRIVATE_TOP = new Set(['server', 'tests', 'scripts', 'node_modules', 'deploy', 'migration']);
+const PRIVATE_FILES = new Set(['package.json', 'package-lock.json', 'compose.yaml', 'dockerfile', '.dockerignore', 'nginx.conf.example', 'source_manifest.txt', 'delivery_status.md']);
+
 function isPrivateStaticPath(urlPath) {
   let decoded;
   try {
@@ -672,7 +678,9 @@ function isPrivateStaticPath(urlPath) {
     return true;
   }
   const segments = path.posix.normalize(decoded).split('/').filter(Boolean);
-  return segments.some((segment) => segment.toLowerCase() === 'server' || segment.startsWith('.'));
+  if (segments.some((segment) => segment.startsWith('.'))) return true;
+  if (segments.some((segment) => PRIVATE_TOP.has(segment.toLowerCase()))) return true;
+  return segments.length === 1 && PRIVATE_FILES.has(segments[0].toLowerCase());
 }
 
 async function resolveStatic(urlPath) {

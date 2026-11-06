@@ -6,6 +6,7 @@
  */
 
 import { applyArtV3 } from './demo-v3.js';
+import { removeKnownDemoPosts } from './demo-post-cleanup.js';
 import { ZJU_COURSES, ZJU_TERM, ZJU_SCHOOL } from './zju-courses-2026aw.js';
 
 const HOUR = 3600 * 1000;

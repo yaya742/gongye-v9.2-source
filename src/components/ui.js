@@ -131,6 +131,7 @@ export function sourceRightsFields({ prefix = 'resource', source = '', rights = 
     </select>
     <p class="field-help">仅拥有文件不等于拥有传播权。教师课件、教材节选等也须说明授权，不上传整本商业教材。</p>
   </div>`;
+}
 
 /** 帖子操作条：列表卡与详情页共用，手机上四项等宽排成一行 */
 export function postActions({ post, liked, likes, saved, saves, gifts, comments, commentControl }) {

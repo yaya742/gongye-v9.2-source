@@ -2,7 +2,6 @@
 
 import { createStore, createRemoteStore } from './state/store.js';
 import { api, auth, files as fileApi } from './api/client.js';
-import * as cloudAuth from './api/cloudAuth.js';
 import * as A from './state/actions.js';
 import * as S from './state/selectors.js';
 import { routeOf, href, navigate, absoluteShare } from './router.js';
@@ -455,6 +454,29 @@ function restoreScroll(y) {
   if (!y) return;
   const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   window.scrollTo(0, Math.min(y, max));
+}
+
+function syncDirectMessagePolling() {
+  const shouldPoll = isRemote && !!ctx.me && ctx.route && ctx.route.name === 'messages'
+    && ctx.route.query.tab === 'direct';
+  if (!shouldPoll) {
+    if (directMessagePollTimer) window.clearInterval(directMessagePollTimer);
+    directMessagePollTimer = 0;
+    return;
+  }
+  if (directMessagePollTimer) return;
+  directMessagePollTimer = window.setInterval(async () => {
+    if (document.hidden || directMessagePollBusy) return;
+    directMessagePollBusy = true;
+    try {
+      const response = await api.getState();
+      store.setState(response.state);
+    } catch (error) {
+      console.warn('[direct messages] refresh failed', error);
+    } finally {
+      directMessagePollBusy = false;
+    }
+  }, 12_000);
 }
 
 function updateDocumentMeta(context) {

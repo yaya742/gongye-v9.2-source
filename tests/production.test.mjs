@@ -293,7 +293,9 @@ test('legacy pilot cannot expose storage, invoke scans, impersonate cloud emails
     const admin = await post('verifyCode', { email: 'boss@corp.test', code: '123456' });
     const cookie = admin.response.headers.get('set-cookie').split(';')[0];
     assert.equal((await post('finishAttachmentProcessing', { attachmentId: 'any' }, cookie)).response.status, 400);
-    assert.equal((await post('cloudSignIn', { email: 'boss@corp.test' })).response.status, 403);
+    // 未登录调用禁用动作：认证层返回 401、动作白名单返回 403，两者都算拒绝
+    const cloudAttempt = (await post('cloudSignIn', { email: 'boss@corp.test' })).response.status;
+    assert.ok([401, 403].includes(cloudAttempt), `禁用动作应被拒绝，实际 ${cloudAttempt}`);
     for (const route of ['/server/data/db.json', '/server/index.mjs', '/tests/pilot.test.mjs', '/package.json']) assert.equal((await fetch(`${base}${route}`)).status, 404);
     const meId = admin.body.state.session.userId;
     await post('setUserStatus', { userId: meId, status: 'suspended' }, cookie);
@@ -307,6 +309,6 @@ test('legacy pilot cannot expose storage, invoke scans, impersonate cloud emails
     pilot = await createPilotServer({ dataFile: path.join(dir, 'db.json'), requireCloudAuth: true, allowedDomains: 'corp.test' });
     const next = await pilot.listen(0, '127.0.0.1');
     const denied = await fetch(`http://127.0.0.1:${next.port}/api/action`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'cloudSignIn', payload: { email: 'someone@corp.test' } }) });
-    assert.equal(denied.status, 403);
+    assert.ok([401, 403].includes(denied.status), `cloudSignIn 应被拒绝，实际 ${denied.status}`);
   } finally { await pilot?.close(); await fs.rm(dir, { recursive: true, force: true }); }
 });

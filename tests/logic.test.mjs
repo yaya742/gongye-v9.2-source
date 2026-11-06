@@ -1028,13 +1028,13 @@ test('发帖课程：不挂圈可以关联课程，课程必须存在', () => {
 test('建圈申请：目录外课程可申请，管理员通过后建课建圈并通知申请人', () => {
   const db = fresh();
   A.quickLogin(db, { userId: 'u_qinghe' });
-  const applied = A.submitApplication(db, { courseName: ' 数字电路 ', reason: '这学期开课' }, NOW);
+  const applied = A.submitApplication(db, { courseName: ' 量子烹饪学 ', reason: '这学期开课' }, NOW);
   assert.ok(applied.ok, applied.message);
   const app = db.applications[db.applications.length - 1];
-  assert.equal(app.courseName, '数字电路');
+  assert.equal(app.courseName, '量子烹饪学');
   assert.equal(app.courseId, null);
-  assert.ok(A.submitApplication(db, { courseName: '数字电路' }, NOW).ok, '重复申请幂等');
-  assert.equal(db.applications.filter((row) => row.courseName === '数字电路').length, 1);
+  assert.ok(A.submitApplication(db, { courseName: '量子烹饪学' }, NOW).ok, '重复申请幂等');
+  assert.equal(db.applications.filter((row) => row.courseName === '量子烹饪学').length, 1);
   assert.equal(A.submitApplication(db, { courseName: '微积分Ⅰ' }, NOW).code, 'duplicate', '已有圈的课程不用申请');
   assert.equal(A.submitApplication(db, { courseName: 'x' }, NOW).code, 'bad_course');
   assert.equal(A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW).code, 'forbidden');
@@ -1043,10 +1043,10 @@ test('建圈申请：目录外课程可申请，管理员通过后建课建圈�
   const done = A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW);
   assert.ok(done.ok, done.message);
   assert.equal(app.state, 'approved');
-  const course = db.courses.find((row) => row.name === '数字电路');
+  const course = db.courses.find((row) => row.name === '量子烹饪学');
   assert.ok(course, '目录里新增了课程');
   assert.equal(S.circleOfCourse(db, course.id).id, app.circleId);
-  assert.ok(db.notifications.some((n) => n.userId === 'u_qinghe' && n.text.includes('数字电路')));
+  assert.ok(db.notifications.some((n) => n.userId === 'u_qinghe' && n.text.includes('量子烹饪学')));
   assert.equal(A.resolveApplication(db, { applicationId: app.id, action: 'approve' }, NOW).code, 'closed');
 });
 

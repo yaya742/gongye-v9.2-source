@@ -6,7 +6,7 @@ import * as S from '../src/state/selectors.js';
 import { TERMS } from '../src/lib/format.js';
 import { about } from '../src/pages/misc.js';
 const NOW = Date.UTC(2026, 9, 26, 4);
-function fresh() { return createSeed(NOW); }
+function fresh() { return createSeed(NOW, { keepDemoPosts: true }); }
 function admin(db) { db.session = { userId: 'u_admin' }; }
 function student(db) { db.session = { userId: 'u_qinghe' }; }
 function payload() {
