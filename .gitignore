@@ -21,3 +21,6 @@ server/pilot.config.json
 # 本地生成的临时文件
 *.tmp
 .qwen-tmp/
+
+# 测试临时目录（fixture 会自行删除，异常中断可能残留）
+tests/.tmp-*/
