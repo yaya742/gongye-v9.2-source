@@ -17,29 +17,11 @@ export function login(ctx) {
   const { db, me, route } = ctx;
   const next = route.query.next || '';
   const pilot = ctx.config && ctx.config.mode === 'production';
-  const cloudAuth = pilot && ctx.config && ctx.config.authMode === 'cloud';
-  const loginIntro = cloudAuth
-    ? '用邮箱接收验证码，登录与注册是同一步。'
-    : pilot
-      ? '仅允许名单内邮箱注册或登录。'
-      : '使用演示账号或固定验证码体验共页。';
-  const loginReminders = cloudAuth
-    ? [
-      '邮箱验证码只证明你能收取邮件，不代表学籍认证；注册与登录都需要邮箱验证码。',
-      '修课清单、学号、课表、上课地点及成员名单不公开；已发布内容对任何访问者公开。',
-      '请勿上传隐私或整本教材。'
-    ]
-    : pilot
-      ? [
-        '邮箱白名单只控制注册和登录资格，不代表邮箱所有权或学籍认证。',
-        '修课清单、学号、课表、上课地点及成员名单不公开；已发布内容对任何访问者公开。',
-        '试用数据保存在服务端，可能按试用安排清空；请勿上传隐私或整本教材。'
-      ]
-      : [
-        '本机演示不会验证邮箱所有权或学籍，验证码是固定演示码。',
-        '修课清单、学号、课表、上课地点及成员名单不公开；已发布内容对任何访问者公开。',
-        '演示数据保存在当前浏览器，不会同步给他人；清除浏览器数据即可移除。'
-      ];
+  const domains = Array.isArray(ctx.config?.emailDomains) ? ctx.config.emailDomains : ['zju.edu.cn', 'st.zju.edu.cn'];
+  const domainText = domains.map((domain) => `@${domain}`).join('、');
+  const authReady = !pilot || (ctx.config.authMode === 'email-otp' && ctx.config.authReady === true);
+  const cooldown = Math.max(0, Math.ceil(((ctx.ui?.codeRetryAt || 0) - Date.now()) / 1000));
+  const sending = !!ctx.ui?.codeSending;
   if (me) {
     return `<div class="layout-1"><div class="card">
       <h1>已登录</h1>
@@ -58,41 +40,45 @@ export function login(ctx) {
   return `
   <div class="layout-1">
     <div class="card">
-      <h1>${cloudAuth ? '登录 / 注册（校园内测）' : pilot ? '登录 / 注册（内部试用）' : '登录共页'}</h1>
-      <p class="secondary small mt-2">${loginIntro}</p>
-      <section class="login-reminder mt-3" aria-label="登录前公告与提醒">
-        <div class="card-title">登录前公告与提醒</div>
-        <ul>${loginReminders.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
-      </section>
+      <h1>${pilot ? '浙大邮箱登录 / 注册' : '登录共页（本地演示）'}</h1>
+      <p class="secondary small mt-2">${pilot
+        ? `使用 ${esc(domainText)} 接收真实邮件验证码，注册和登录是同一步。`
+        : '独立本地演示：不会真的发邮件，演示数据只保存在本机。'}</p>
+      ${pilot ? `<p class="small mt-3">共页是学生自发的课程资料交流项目，非浙江大学官方网站，亦不代表学校或教师。</p>
+        <div class="mt-3">${notice(authReady
+          ? '验证码由服务端发送与验证；请到邮箱收取，没收到先看垃圾邮件。'
+          : '邮箱登录暂不可用：真实邮件服务（SMTP）尚未配置或未就绪，已禁用发送与登录。请联系维护者，不要使用演示验证码。', authReady ? 'info' : 'warn', 'lock')}</div>` : ''}
       ${next ? `<div class="mt-3">${notice(`登录后会回到：${esc(next)}`, 'info', 'arrow')}</div>` : ''}
 
       <form data-form="login-verify" class="mt-4" novalidate>
         <div class="field">
           <label for="login-email">邮箱</label>
           <input class="input" id="login-email" name="email" type="email" required
-            placeholder="${pilot ? 'name@example.com' : 'name@company.com'}" autocomplete="email" value="${pilot ? '' : 'qinghe@example.com'}">
+            placeholder="${pilot ? esc(domains[0] ? `学号@${domains[0]}` : '请输入已配置域名的邮箱') : 'name@company.com'}" autocomplete="email" value="${pilot ? '' : 'qinghe@example.com'}">
         </div>
         <div class="field">
           <label for="login-code">验证码</label>
           <div class="row">
             <input class="input" id="login-code" name="code" inputmode="numeric" maxlength="6"
               placeholder="6 位验证码" autocomplete="one-time-code">
-            <button class="btn btn-ghost" type="button" data-action="send-code">发送验证码</button>
+            <button class="btn btn-ghost" type="button" data-action="send-code" ${!authReady || cooldown || sending ? 'disabled' : ''}>${sending ? '发送中…' : cooldown ? `${cooldown} 秒后重发` : '发送验证码'}</button>
           </div>
-          <p class="field-help" data-code-hint>${cloudAuth
-            ? '点「发送验证码」后去邮箱取 6 位数字，10 分钟内有效。'
-            : pilot
-            ? '试用期验证码固定 123456；接入企业邮箱后会改为真实邮件。'
-            : '演示环境验证码固定为 123456；真实环境由邮件服务发送并设发送冷却。'}</p>
+          <p class="field-help" data-code-hint role="status">${pilot
+            ? esc(ctx.ui?.codeHint || `支持 ${domainText}；发送成功后至少等待 60 秒再重发，以服务端限制为准。`)
+            : '演示环境验证码固定为 123456；只用于本地演示。'}</p>
         </div>
-        <button class="btn btn-block mt-4" type="submit">登录 / 注册</button>
+        <label class="checkbox">
+          <input type="checkbox" name="agree" required>
+          <span>${pilot
+            ? '我了解这是非官方学生项目，同意邮箱用于登录；只分享来源合法且有权公开的资料，不上传隐私或整本商业教材。'
+            : '我已了解这是本地演示环境。'}</span>
+        </label>
+        <button class="btn btn-block mt-4" type="submit" ${!authReady || ctx.ui?.verifying ? 'disabled' : ''}>${ctx.ui?.verifying ? '验证中…' : '登录 / 注册'}</button>
       </form>
 
-      ${cloudAuth
-        ? ''
-        : pilot
-          ? `<p class="tiny muted mt-3">注册由管理员白名单控制；如需加入，请联系管理员把邮箱加到 server/allowlist.txt。</p>`
-          : `<hr>
+      ${pilot
+        ? `<p class="tiny muted mt-3">开放域名：${esc(domainText)}。一个邮箱一个账号，会话由同源 Cookie 维持，前端不保存登录令牌。</p>`
+        : `<hr>
       <div class="stack-12">
         <div class="section-title">使用演示账号（无需验证码）</div>
         <div class="chips">
@@ -100,6 +86,7 @@ export function login(ctx) {
             ${avatar(user, 'avatar-xs')}${esc(user.nickname)}${user.role === 'admin' ? '（管理员）' : ''}
           </button>`).join('')}
         </div>
+        <p class="tiny muted">演示账号的数据只存在于本机浏览器；真实环境必须由可信后端签发会话。</p>
       </div>`}
     </div>
     <div class="card">
@@ -133,7 +120,8 @@ export function profile(ctx) {
   const followers = S.followerCount(db, user.id);
   const received = S.receivedGiftTotal(db, user.id);
   const following = me ? S.isFollowing(db, me.id, 'user', user.id) : false;
-  const circles = S.myCircles(db, user.id);
+  const showCircles = ctx.config?.mode !== 'production' || isMe;
+  const circles = showCircles ? S.myCircles(db, user.id) : [];
 
   return `
   <div class="layout-2">
@@ -148,9 +136,6 @@ export function profile(ctx) {
               <span class="small">${esc(level.name)}</span>
               ${isMe ? `<span class="tiny muted">${level.xp} 经验${level.isMax ? ' · 已达最高等级' : ` · 还差 ${level.remaining} 到下一级`}</span>` : ''}
               ${user.role === 'admin' ? '<span class="status-pill">站点维护</span>' : ''}
-              <button class="icon-btn level-help-trigger" type="button" data-action="level-info"
-                data-level="${level.level}" data-name="${esc(level.name)}"
-                aria-label="查看参与等级说明">${icon('question')}</button>
             </div>
             <p class="small secondary mt-2">${esc(user.bio || '还没有写简介。')}</p>
             <p class="tiny muted mt-2">加入于 ${esc(formatDay(user.joinedAt))} · 自述学校并非认证信息，页面不展示修课清单</p>
@@ -163,13 +148,14 @@ export function profile(ctx) {
         ])}
         <div class="row wrap mt-4">
           ${isMe
-            ? `<a class="btn btn-ghost btn-sm" href="${href('/me/settings')}">编辑资料</a>`
+            ? `<a class="btn btn-ghost btn-sm" href="${href('/me/settings')}">编辑资料</a>
+               <a class="btn btn-ghost btn-sm" href="${href('/me/wallet')}">我的页签</a>
+               <a class="btn btn-ghost btn-sm" href="${href('/me/saved')}">我的收藏</a>
+               <a class="btn btn-ghost btn-sm" href="${href('/me/growth')}">我的成长</a>`
             : `<button class="btn btn-sm" type="button" data-action="follow-user" data-user="${esc(user.id)}">
                  ${following ? '已关注' : '关注作者'}
                </button>
-               ${me
-                 ? `<button class="btn btn-ghost btn-sm" type="button" data-action="open-direct-thread" data-peer="${esc(user.id)}">私信</button>`
-                 : `<a class="btn btn-ghost btn-sm" href="${href('/login', { next: `/me/messages?tab=direct&with=${encodeURIComponent(user.id)}` })}">登录后私信</a>`}`}
+               <a class="btn btn-ghost btn-sm" href="${href('/me/messages')}">消息</a>`}
         </div>
       </div>
 
@@ -185,8 +171,17 @@ export function profile(ctx) {
     </main>
 
     <aside class="rail">
-      <section class="card">
-        <div class="card-title">加入的课友圈</div>
+      ${isMe ? `<section class="card">
+        <div class="card-title">我的常用入口</div>
+        <div class="stack">
+          <a class="link small" href="${href('/me/saved')}">我的收藏</a>
+          <a class="link small" href="${href('/me/messages')}">消息</a>
+          <a class="link small" href="${href('/me/wallet')}">页签与记录</a>
+          <a class="link small" href="${href('/me/settings')}">账号设置</a>
+        </div>
+      </section>` : ''}
+      ${showCircles ? `<section class="card">
+        <div class="card-title">${isMe ? '我的课友圈（仅自己可见）' : '加入的课友圈'}</div>
         ${circles.length
           ? circles.slice(0, 6).map(({ circle }) => `<div class="mb-3">
               <a class="small" href="${href(`/circles/${circle.id}`)}">${esc(S.circleShort(db, circle))}</a>
@@ -194,6 +189,14 @@ export function profile(ctx) {
             </div>`).join('')
           : '<p class="small muted">没有公开的圈子。</p>'}
         <p class="tiny muted mt-2">成员名单不公开，也不提供导出。</p>
+      </section>` : ''}
+      <section class="card">
+        <div class="card-title">参与等级</div>
+        <p class="small secondary">等级只表达参与程度，不影响下载、提问和评论等基本权利。点赞、下载、领页签和赠页签不产生经验；收到同学送的页签 +5（每天最多 5 枚）。</p>
+        <div class="stack tiny muted mt-3">
+          <p>初翻 / 拾页 / 成册 / 共著 / 传薪</p>
+          <p>阈值 0 / 50 / 150 / 400 / 1000</p>
+        </div>
       </section>
     </aside>
   </div>`;
@@ -247,135 +250,34 @@ export function messages(ctx) {
   if (!me) {
     return `<div class="layout-1"><div class="card">
       <h1>消息</h1>
-      ${notice('登录后查看通知和私信。', 'warn', 'lock')}
+      ${notice('登录后查看回复、页签和系统通知。', 'warn', 'lock')}
       <a class="btn mt-4" href="${href('/login', { next: '/me/messages' })}">登录 / 注册</a>
     </div></div>`;
   }
-  const tab = route.query.tab || 'all';
-  const isDirect = tab === 'direct';
-  const noticeTab = ['all', 'reply', 'gift', 'system'].includes(tab) ? tab : 'all';
+  const tab = ['all', 'reply', 'gift', 'system'].includes(route.query.tab) ? route.query.tab : 'all';
   const all = S.notificationsFor(db, me.id);
   const unread = all.filter((n) => !n.readAt).length;
-  const directMessages = (db.directMessages || [])
-    .filter((message) => message.senderId === me.id || message.recipientId === me.id);
-  const directUnread = directMessages.filter((message) => message.recipientId === me.id && !message.readAt).length;
-  const items = noticeTab === 'all'
+  const items = tab === 'all'
     ? all
-    : all.filter((n) => (noticeTab === 'system' ? ['system', 'refund', 'accepted'].includes(n.type) : n.type === noticeTab));
-
-  let directContent = '';
-  if (isDirect) {
-    const peerId = String(route.query.with || '');
-    if (peerId) {
-      const peer = S.userOf(db, peerId);
-      if (!peer || peer.id === me.id || peer.status !== 'active') {
-        directContent = `<div class="card">${emptyState({
-          img: 'removed.svg', title: '无法打开这段对话', text: '对方账号不存在或当前不可用。',
-          actions: `<a class="btn btn-sm" href="${href('/me/messages', { tab: 'direct' })}">返回私信</a>`
-        })}</div>`;
-      } else {
-        const thread = directMessages
-          .filter((message) => (message.senderId === me.id && message.recipientId === peer.id)
-            || (message.senderId === peer.id && message.recipientId === me.id))
-          .slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        const previousList = document.querySelector('.dm-message-list');
-        const wasAtBottom = !previousList
-          || previousList.scrollHeight - previousList.scrollTop - previousList.clientHeight < 80;
-        const unreadInThread = thread.some((message) => message.senderId === peer.id
-          && message.recipientId === me.id && !message.readAt);
-        directContent = `
-          <section class="card dm-thread">
-            <div class="row dm-thread-head">
-              <a class="link" href="${href('/me/messages', { tab: 'direct' })}">‹ 私信列表</a>
-              <span class="grow"></span>
-              ${unreadInThread ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-direct-read" data-peer="${esc(peer.id)}">标为已读</button>` : ''}
-            </div>
-            <div class="author dm-peer">${avatar(peer)}<div class="grow"><b>${esc(peer.nickname)}</b></div>
-              <a class="link small" href="${href(`/u/${peer.id}`)}">查看主页</a>
-            </div>
-            <div class="dm-message-list">
-              ${thread.length ? thread.map((message) => {
-                const mine = message.senderId === me.id;
-                return `<div class="dm-message-row ${mine ? 'is-mine' : ''}">
-                  <div class="dm-message-meta">${mine ? '我' : esc(peer.nickname)} · ${esc(formatDateTime(message.createdAt))}</div>
-                  <div class="dm-bubble">${esc(message.body).replace(/\n/g, '<br>')}</div>
-                  ${mine && message.readAt ? '<div class="dm-read-state">已读</div>' : ''}
-                </div>`;
-              }).join('') : '<p class="tiny muted dm-empty-thread">还没有消息，可以从课程问题开始聊。</p>'}
-              <div id="dm-thread-end"></div>
-            </div>
-            <form class="dm-compose" data-form="direct-message" data-recipient="${esc(peer.id)}">
-              <label class="visually-hidden" for="dm-body">私信内容</label>
-              <textarea class="textarea" id="dm-body" name="body" rows="3" maxlength="2000" required
-                placeholder="写一条私信……"></textarea>
-              <div class="row wrap dm-compose-foot">
-                <span class="tiny muted">最多 2000 字</span>
-                <button class="btn btn-sm" type="submit">发送</button>
-              </div>
-            </form>
-          </section>`;
-        ctx.after.push(() => {
-          const list = document.querySelector('.dm-message-list');
-          if (list && wasAtBottom) list.scrollTop = list.scrollHeight;
-        });
-      }
-    } else {
-      const conversations = new Map();
-      directMessages.forEach((message) => {
-        const peerIdForMessage = message.senderId === me.id ? message.recipientId : message.senderId;
-        const previous = conversations.get(peerIdForMessage);
-        if (!previous || new Date(message.createdAt) > new Date(previous.last.createdAt)) {
-          conversations.set(peerIdForMessage, { last: message });
-        }
-      });
-      const sortedConversations = [...conversations.entries()]
-        .map(([peerIdForMessage, row]) => ({ peer: S.userOf(db, peerIdForMessage), ...row }))
-        .filter((row) => row.peer && row.peer.status === 'active')
-        .sort((a, b) => new Date(b.last.createdAt) - new Date(a.last.createdAt));
-      directContent = sortedConversations.length
-        ? `<div class="card card-flush"><ul class="list-plain dm-conversations">
-            ${sortedConversations.map(({ peer, last }) => {
-              const unreadCount = directMessages.filter((message) => message.senderId === peer.id
-                && message.recipientId === me.id && !message.readAt).length;
-              return `<li><button class="dm-conversation" type="button" data-action="open-direct-thread" data-peer="${esc(peer.id)}">
-                ${avatar(peer)}<span class="grow dm-conversation-copy"><b>${esc(peer.nickname)}</b>
-                  <span>${last.senderId === me.id ? '我：' : ''}${esc(last.body)}</span></span>
-                <span class="dm-conversation-end"><time>${esc(timeAgo(last.createdAt))}</time>
-                  ${unreadCount ? `<i class="dm-unread" aria-label="${unreadCount} 条未读">${unreadCount > 99 ? '99+' : unreadCount}</i>` : ''}</span>
-              </button></li>`;
-            }).join('')}
-          </ul></div>`
-        : `<div class="card">${emptyState({
-          img: 'empty-feed.svg', title: '还没有私信',
-          text: '打开同学主页，点击“私信”即可开始一段对话。',
-          actions: `<a class="btn btn-sm" href="${href('/circles', { mode: 'discover' })}">去课友圈认识同学</a>`
-        })}</div>`;
-    }
-  }
+    : all.filter((n) => (tab === 'system' ? ['system', 'refund', 'accepted'].includes(n.type) : n.type === tab));
 
   return `
   <div class="layout-1">
     <nav class="crumbs" aria-label="面包屑"><a href="${href(`/u/${me.id}`)}">我的主页</a><span>/</span><span>消息</span></nav>
     <div class="page-head">
       <h1>消息</h1>
-      <p>${isDirect ? `${directUnread ? `${directUnread} 条未读私信` : '查看你的私信对话'}` : `${unread ? `${unread} 条未读通知` : '通知已读完'} · 自己的操作不会通知自己`}</p>
+      <p>${unread ? `${unread} 条未读` : '全部已读'} · 自己的操作不会通知自己</p>
     </div>
 
-    <div class="tabs">
-      <a class="tab" aria-current="${!isDirect ? 'page' : 'false'}" href="${href('/me/messages')}">通知${unread ? ` · ${unread}` : ''}</a>
-      <a class="tab" aria-current="${isDirect ? 'page' : 'false'}" href="${href('/me/messages', { tab: 'direct' })}">私信${directUnread ? ` · ${directUnread}` : ''}</a>
-      ${isDirect ? `<button class="icon-btn direct-help" type="button" data-action="direct-mode-info" aria-label="私信说明">${icon('question')}</button>` : ''}
-      <span class="grow"></span>
-      ${!isDirect && unread ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-all-read">全部标为已读</button>` : ''}
-    </div>
-
-    ${isDirect ? directContent : `
-    <div class="tabs dm-notice-tabs" role="tablist">
+    <div class="tabs" role="tablist">
       ${['all', 'reply', 'gift', 'system'].map((key) => `<a class="tab" role="tab"
-        aria-selected="${noticeTab === key}" href="${href('/me/messages', { tab: key === 'all' ? '' : key })}">
+        aria-selected="${tab === key}" href="${href('/me/messages', { tab: key === 'all' ? '' : key })}">
         ${key === 'all' ? '全部' : key === 'reply' ? '回复' : key === 'gift' ? '页签' : '系统'}
       </a>`).join('')}
+      <span class="grow"></span>
+      ${unread ? `<button class="btn btn-quiet btn-sm" type="button" data-action="mark-all-read">全部标为已读</button>` : ''}
     </div>
+
     ${items.length ? `<div class="card card-flush">
       <ul class="list-plain">
         ${items.map((n) => {
@@ -405,7 +307,8 @@ export function messages(ctx) {
       text: '别人回复你的帖子、采纳你的回答或给你送页签时，会在这里提醒。',
       actions: `<a class="btn btn-sm" href="${href('/circles')}">去课友圈看看</a>`
     })}</div>`}
-    `}
+
+    <p class="tiny muted mt-4">首版只有站内消息：不做私信、邮件营销或浏览器推送。圈内动态用轻量提示，不逐帖群发；归档与静音圈不制造红点焦虑。</p>
   </div>`;
 }
 
@@ -548,7 +451,7 @@ export function settings(ctx) {
               <img src="assets/${esc(file)}" alt="默认头像 ${index + 1}" width="32" height="32" style="border-radius:50%;display:block">
             </label>`).join('')}
           </div>
-          <p class="field-help">可选 8 款内置头像，随时可更换。</p>
+          <p class="field-help">首版提供 6 款几何默认头像；上传自定义头像需要真实存储服务。</p>
         </div>
         <div class="field">
           <label for="set-nickname">昵称 <span class="label-hint">2–16 个字符，可用化名</span></label>
@@ -571,16 +474,24 @@ export function settings(ctx) {
           <span>收到页签时通知我（同一帖的赠签可合并）</span></label>
         <label class="checkbox mb-2"><input type="checkbox" name="system" ${prefs.system !== false ? 'checked' : ''}>
           <span>系统通知：资料审核结果、举报处理、退款</span></label>
-        <p class="field-help">系统通知不可关闭；邮件营销和浏览器推送暂不提供。</p>
+        <p class="field-help">系统通知不可关闭；首版不做私信、邮件营销和浏览器推送。</p>
         <button class="btn btn-ghost" type="submit">保存设置</button>
       </form>
     </div>
 
-    <div class="row wrap mt-4">
-      <button class="btn btn-ghost btn-sm" type="button" data-action="logout">退出登录</button>
-      ${ctx.config && ctx.config.mode === 'production'
-        ? ''
-        : '<button class="btn btn-danger btn-sm" type="button" data-action="reset-demo">重置演示数据</button>'}
+    <div class="card">
+      <div class="card-title">账号与隐私</div>
+      <div class="stack small secondary">
+        <p>· 邮箱验证只证明你控制这个邮箱，学校与修课信息属于自述，不是学籍认证。</p>
+        <p>· 页面不会公开你的修课清单、学号、课表或上课地点；成员名单也不公开。</p>
+        <p>· 演示数据保存在本机浏览器（localStorage），清除浏览器数据即可移除。</p>
+      </div>
+      <div class="row wrap mt-4">
+        <button class="btn btn-ghost btn-sm" type="button" data-action="logout">退出登录</button>
+        ${ctx.config && ctx.config.mode === 'production'
+          ? ''
+          : '<button class="btn btn-danger btn-sm" type="button" data-action="reset-demo">重置演示数据</button>'}
+      </div>
     </div>
   </div>`;
 }

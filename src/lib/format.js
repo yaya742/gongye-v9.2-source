@@ -19,9 +19,9 @@ export const BOARDS = [
 
 export const RESOURCE_TYPES = ['笔记', '题解', '复习整理', '学习方法'];
 
-export const TERMS = ['2026秋冬', '2026秋', '2026春', '2025秋', '通用·不限学期'];
+export const TERMS = ['2026秋冬', '2026秋', '2026冬', '2026春夏', '2026春', '2026夏', '2025秋冬', '2025秋', '2025冬', '2025春夏', '2025春', '2025夏', '2024秋冬', '2024秋', '2024春夏', '2024春', '历史学期·详见说明', '通用·不限学期'];
 
-export const SCHOOLS = ['示例大学', '通用·不限学校'];
+export const SCHOOLS = ['浙江大学', '通用·不限学校'];
 
 export const DEMO_STORAGE_FALLBACK = 'gongye-demo-v1';
 

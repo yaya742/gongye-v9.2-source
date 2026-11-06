@@ -1,16 +1,11 @@
-# 本地与编辑器产物
 node_modules/
-*.log
-.DS_Store
-Thumbs.db
-
-# 内部试用后端的数据（包含同事账号，不要提交）
 server/data/
-
-# 验收截图（本地可重新生成：node scripts/qa.mjs）
-# 如需把截图随源码一起归档，把下面一行删掉
-# docs/screenshots/
-
-# 本地生成的临时文件
-*.tmp
-.qwen-tmp/
+server/private/
+server/backups/
+.env
+.env.*
+!.env.example
+*.log
+.tmp/
+coverage/
+release/

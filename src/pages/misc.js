@@ -60,7 +60,7 @@ export function course(ctx) {
               ${course.code ? `<span class="dot-sep">·</span><span>${esc(course.code)}</span>` : ''}
               <span class="dot-sep">·</span><span>${esc(course.category || '课程')}</span>
             </div>
-            <p class="tiny muted mt-2">课程是跨学期的稳定实体；9.2 起一门课只有一个课程圈，学期写在帖子和资料里。</p>
+            <p class="tiny muted mt-2">一门课一个跨学期课程圈；资料标明适用学期与范围，使用时请核对教材和教师安排。课程目录不等同教务开课清单。</p>
           </div>
         </div>
         <div class="row wrap mt-4">
@@ -74,7 +74,7 @@ export function course(ctx) {
 
       <section class="card">
         <div class="card-title">这个课程的课友圈</div>
-        <p class="tiny muted mb-2">9.2 起一门课只有一个共用圈，不再区分教学班与教师。</p>
+        <p class="tiny muted mb-2">每门课共用一个圈，便于不同年级的同学持续补充和纠错。</p>
         ${active.length ? active.map((c) => circleCard(c, 'active')).join('')
           : '<p class="small secondary">这门课还没有课友圈。可以提交建圈申请。</p>'}
         <p class="tiny muted mt-2">加入后就能和同课程的同学一起讨论；学期写在帖子和资料里。</p>
@@ -108,7 +108,7 @@ export function course(ctx) {
 
     <aside class="rail">
       <section class="card">
-        <div class="card-title">历史学期</div>
+        <div class="card-title">归档状态</div>
         ${archived.length
           ? archived.map((c) => circleCard(c, 'archived')).join('')
           : '<p class="small muted">暂无归档的圈。</p>'}
@@ -117,7 +117,7 @@ export function course(ctx) {
       <section class="card">
         <div class="card-title">课程数据</div>
         ${statRow([
-          { value: active.length, label: '当期圈' },
+          { value: active.length, label: '开放课程圈' },
           { value: resources.length, label: '公开资料' },
           { value: recentPosts.length, label: '近期讨论' }
         ])}
@@ -223,9 +223,9 @@ export function admin(ctx) {
       <h1>管理后台</h1>
       ${notice('这里需要管理员权限。普通用户看不到举报处理、封禁账号/帖子与审计记录。', 'warn', 'lock')}
       ${ctx.config && ctx.config.mode === 'production'
-        ? '<p class="small secondary mt-3">请使用已在服务端配置为管理员的邮箱登录。普通试用账号不一定具备管理员权限。</p>'
+        ? '<p class="small secondary mt-3">请用管理员邮箱登录后查看。管理员邮箱由启动服务时的 ADMIN_EMAIL 指定，且需要先加入 server/allowlist.txt。</p>'
         : '<p class="small secondary mt-3">演示环境可以用「站点维护」账号登录后查看；真实环境由后端校验角色，隐藏按钮不等于权限。</p>'}
-      <a class="btn mt-4" href="${href('/login', { next: '/admin' })}">${ctx.config && ctx.config.mode === 'production' ? '登录管理员账号' : '使用演示管理员账号登录'}</a>
+      <a class="btn mt-4" href="${href('/login', { next: '/admin' })}">使用演示管理员账号登录</a>
     </div></div>`;
   }
 
@@ -317,6 +317,11 @@ export function admin(ctx) {
         ? `<ul class="list-plain">${db.applications.map((app) => `<li>
             <div class="small">${esc((S.courseOf(db, app.courseId) || {}).name || '')}${app.reason ? ` · ${esc(app.reason)}` : ''}</div>
             <div class="tiny muted">申请人 ${esc((S.userOf(db, app.applicantId) || {}).nickname || '')} · 状态 ${esc(app.state)}</div>
+            ${app.state === 'pending' ? `<form class="row wrap mt-2" data-form="admin-application" data-application="${esc(app.id)}">
+              <input class="input" name="reason" required maxlength="500" placeholder="审核理由">
+              <select class="select" name="approved"><option value="yes">批准</option><option value="no">拒绝</option></select>
+              <button class="btn btn-sm" type="submit">提交审核</button>
+            </form>` : `<div class="tiny muted">${esc(app.reviewReason || '')}</div>`}
           </li>`).join('')}</ul>`
         : '<p class="small secondary">暂无申请。创建者默认没有内容管理权；审核通过只生成一个圈。</p>'}
     </div>`;
@@ -381,7 +386,7 @@ export function admin(ctx) {
     <p class="tiny muted mt-3">审计记录只能追加，普通管理员不能改写；页面不提供静默改余额的入口。</p>`;
   } else {
     body = `<div class="card">
-      <div class="card-title">资料来源事件（本地演示，不上报）</div>
+      <div class="card-title">资料来源事件（${ctx.config && ctx.config.mode === 'production' ? '仅用于运维，非完整分析系统' : '本地演示，不上报'}）</div>
       ${statRow([
         { value: events.landing, label: '资料落地页浏览' },
         { value: events.search, label: '搜索' },
@@ -421,11 +426,11 @@ export function admin(ctx) {
         </div>
       </section>
       <section class="card">
-        <div class="card-title">${ctx.config && ctx.config.mode === 'production' ? '内测说明' : '演示提醒'}</div>
+        <div class="card-title">${ctx.config && ctx.config.mode === 'production' ? '操作提醒' : '演示提醒'}</div>
         <p class="small secondary">${ctx.config && ctx.config.mode === 'production'
-          ? '这是内部试用版：举报处理、封禁、归档会写入服务端并记入审计；已发布内容任何访问者都可浏览，数据可能清空。'
+          ? '举报处理、封禁、归档会修改共享服务端数据并记录审计。请核对理由和证据，操作前确保已有可靠备份；不要将演示数据重置用于正式账号。'
           : '这是静态演示版：所有处理只改本机浏览器数据，没有真实退款、扫描或存储。生产实现必须由服务端事务与后台任务完成。'}</p>
-        <button class="btn btn-danger btn-sm mt-3" type="button" data-action="reset-demo">重置演示数据</button>
+        ${ctx.config && ctx.config.mode === 'production' ? '' : '<button class="btn btn-danger btn-sm mt-3" type="button" data-action="reset-demo">重置演示数据</button>'}
       </section>
     </aside>
   </div>`;
@@ -452,17 +457,33 @@ export function notFound(ctx) {
 }
 
 export function about(ctx) {
-  return `<div class="layout-1"><div class="card">
-    <h1>关于共页</h1>
-    <p class="small secondary mt-3">共页是面向大学生的学习社区：找资料负责引流，课友圈负责留存，两者并列，共享课程、作者、帖子与附件。</p>
-    <p class="small secondary mt-2">${ctx.config && ctx.config.mode === 'production'
-      ? '当前是内部试用版：账号和数据保存在试用服务端；已发布帖子、资料及圈内公开内容任何访问者都可浏览，登录资格不提供内容保密。附件仍是示例 PDF，尚未接入真实上传与扫描。'
-      : '当前是静态演示版：没有真实账号、服务端或文件上传与扫描。所有内容与数字均为示例；操作只保存在当前浏览器，不会同步给其他访问者。样例中的公开内容仍可被任何访客浏览。'}</p>
-    <div class="row mt-4 wrap">
-      <a class="btn btn-sm" href="${href('/')}">找资料</a>
-      <a class="btn btn-ghost btn-sm" href="${href('/circles')}">课友圈</a>
-    </div>
-  </div></div>`;
+  const production = ctx.config && ctx.config.mode === 'production';
+  const contact = String((ctx.config && ctx.config.supportEmail) || '');
+  const contactReady = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(contact);
+  return `<div class="layout-1">
+    <section class="card"><h1>共页 · 社区规则与隐私说明</h1>
+      <p class="small secondary mt-3">面向浙大全校课程的学生学习互助社区。共页不是浙江大学官方教学或考试平台，邮箱验证仅确认邮箱所有权，不证明当前修课、学生身份或学校背书。</p>
+      <p class="small secondary mt-2">${production ? '当前为服务端共享版本；邮件、文件扫描和存储是否就绪以实际配置为准，未配置时不会伪装发送邮件或放行文件。' : '当前为独立静态演示，账号、资料和数字为示例，请勿输入真实隐私信息。'}</p>
+      <div class="row mt-4 wrap"><a class="btn btn-sm" href="${href('/resources')}">找资料</a><a class="btn btn-ghost btn-sm" href="${href('/find-circles')}">查找全校课程圈</a></div>
+    </section>
+    <section class="card"><h2>如何贡献与使用资料</h2><div class="stack small secondary mt-3">
+      <p>一门课一个圈，跨学期积累。标明学期、章节、教材、适用范围与未覆盖内容；不同教师和学期的考核要求可能不同。资料仅供参考，欢迎在原帖提出具体纠错。</p>
+      <p>仅上传原创、得到授权或按公开许可可再分享的材料，并注明作者、来源及许可依据。勾选确认不代表平台已核实版权；公开可见不等于允许复制传播。</p>
+      <p>禁止上传未经允许的教材扫描件、教师课件、个人信息、未公开试卷、进行中考试答案及代写代考内容。不得将社区用于作弊；对历史试题也须确认分享权利及学校规定。</p>
+      <p>附件通过技术检查后才可发布。扫描不保证绝对安全或内容准确；请勿在不可信文档中输入账号密码。前两页预览可公开浏览，完整下载须验证邮箱；公开帖子可能被搜索引擎收录。</p>
+    </div></section>
+    <section class="card"><h2>隐私与账号</h2><div class="stack small secondary mt-3">
+      <p>为登录保存邮箱、验证状态与会话；资料、帖子、评论、昵称和简介按公开内容处理。邮箱及个人入圈、收藏、关注清单不向其他普通用户公开；管理员因审核和运维可访问必要数据。</p>
+      <p>验证码通过配置的邮件服务发送，会涉及邮件服务商处理；短期保存限流所需的邮箱和网络标识。会话以 HttpOnly Cookie 保存。请勿在公开内容中填写学号、完整课表、手机号或他人隐私。</p>
+      <p>可退出/静音课程圈、取消资料索引或删除自己的帖子。取消索引不会撤回已公开原帖或他人已下载的副本；删除和下架会立即关闭本站附件入口，备份可能在运维保留周期内存在。</p>
+      <p>邮箱更改、数据副本、账号注销或隐私投诉请联系维护者核实处理；当前不提供自动注销，也不承诺能够撤回外部转载。</p>
+    </div></section>
+    <section class="card"><h2>举报、版权投诉与申诉</h2><div class="stack small secondary mt-3">
+      <p>登录后可通过帖子/评论上的举报入口提交位置、问题及证据。权利人请提供原作品、权属或授权证据、涉事链接与可回复方式，维护者核实后可隐藏、永久移除或恢复，并记录处理理由。</p>
+      <p>${contactReady ? `无需登录的投诉、申诉与隐私联系：<a class="link" href="mailto:${esc(contact)}">${esc(contact)}</a>。` : '运营方尚未配置无需登录的投诉邮箱。正式公开前必须补齐可用联系方式；现阶段可通过部署方已有联系渠道请求处理。'}</p>
+      <p>课程目录缺失或名称错误也可向维护者反馈。课程圈申请不会赋予申请者管理权，学生之间可平等贡献和纠错。</p>
+    </div></section>
+  </div>`;
 }
 
 

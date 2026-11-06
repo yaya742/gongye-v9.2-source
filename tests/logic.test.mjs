@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSeed } from '../src/data/seed.js';
+import { ZJU_COURSES } from '../src/data/zju-courses-2026aw.js';
 import * as A from '../src/state/actions.js';
 import { levelOf } from '../src/lib/format.js';
 import * as S from '../src/state/selectors.js';
@@ -40,7 +41,7 @@ function resourceInput(overrides = {}) {
   return {
     title: '数列极限的三种做法整理',
     courseId: 'c_calc',
-    school: '示例大学',
+    school: '浙江大学',
     term: '2026秋',
     type: '笔记',
     coverage: '数列极限、夹逼、单调有界',
@@ -183,7 +184,7 @@ test('评论权限：普通圈帖需成员，公开资料帖允许非成员纠�
   assert.equal(S.isActiveMember(db, me.id, 'ci_calc_a'), false, '评论不自动入圈');
 
   const member = S.membership(db, 'u_qinghe', 'ci_calc_a');
-  member.muted = true;
+  member.moderationMuted = true;
   const mutedComment = A.addComment(db, { postId: 'p_calc_notes', body: '被禁言的人不能借资料入口绕过限制。' }, NOW);
   assert.equal(mutedComment.ok, true, '其他用户不受影响');
   db.session = { userId: 'u_qinghe' };
@@ -471,7 +472,7 @@ test('管理员：新建课友圈、封禁账号与帖子', () => {
   db.session = { userId: 'u_admin' };
 
   // 新建课友圈：一门课只能有一个圈
-  db.courses.push({ id: 'c_test_new', school: '示例大学', name: '测试课程', code: null, category: '测试' });
+  db.courses.push({ id: 'c_test_new', school: '浙江大学', name: '测试课程', code: null, category: '测试' });
   const created = A.createCircle(db, { courseId: 'c_test_new' }, NOW);
   assert.ok(created.ok, created.message);
   const circle = S.circleOf(db, created.data.circleId);
@@ -937,13 +938,14 @@ test('9.2 课程圈：一门课一个圈，不再有教学班、教师与学期�
   assert.ok(db.circles.every((circle) => circle.status === 'active'));
   assert.equal(new Set(db.circles.map((circle) => circle.inviteCode)).size, db.circles.length, '邀请码唯一');
 
-  assert.equal(realCourses.length, 6, '演示课程 6 门');
-  assert.ok(db.circles.every((circle) => db.courses.some((course) => course.id === circle.courseId)),
-    '每个圈都指向已存在的课程');
-  assert.equal(db.courses.filter((course) => course.school === '示例大学').length, 6, '示例大学课程 6 门');
-  assert.ok(db.courses.every((course) => ['示例大学', '通用·不限学校'].includes(course.school)), '学校只有演示项');
-  const shared = db.courses.find((course) => course.name === '数据结构');
-  assert.ok(shared, '演示课程仍在目录里');
+  const catalogNames = new Set(ZJU_COURSES.map((course) => course.name));
+  assert.equal(db.courses.filter((course) => catalogNames.has(course.name)).length, 2371, '2371 个课程名都有对应课程');
+  const byName = (name) => db.courses.find((course) => course.name === name);
+  const target = byName(ZJU_COURSES[0].name);
+  assert.ok(target, '浙大课程应在目录里');
+  assert.ok(db.circles.some((circle) => circle.courseId === target.id), '浙大课程也有圈');
+  const shared = byName('数据结构');
+  assert.ok(shared, '同名演示课程与浙大课程复用一条课程记录');
   assert.equal(db.circles.filter((circle) => circle.courseId === shared.id).length, 1, '同名课程只有一个圈');
   assert.equal(S.circleLabel(db, db.circles[0]).endsWith('课友圈'), true);
 });

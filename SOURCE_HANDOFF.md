@@ -1,11 +1,13 @@
-# 共页 v9.2 源码交接说明
+# 历史：共页 v9.2 源码交接说明
 
-给接手维护的同事：这份包是**9.2.0 源码快照**，包含前端、测试、自检脚本、文档和独立试用后端代码。源码中 `src/config.js` 默认是 `demo-static`，但托管平台可覆盖运行时配置；不能据此断定当前线上状态。检查线上时以实际页面运行提示和 `/api/health` 为准，健康检查只证明后端在响应，不代表已通过安全审查。
+> 本文件记录原始交接包，不是当前 v10 生产部署说明。当前请看 `README.md` 顶部、`DEPLOY_PRODUCTION.md` 和 `DELIVERY_STATUS.md`；默认启动、依赖、认证与数据存储均已改变。
+
+给接手维护的同事：这份包是**当前线上版本（9.2）的完整前端源码**，外加测试、自检脚本、文档和内部试用后端代码。改完按本文第 6 节的流程走即可，不需要构建工具。
 
 - 版本：`9.2.0`
 - 打包日期：2026-10-30
-- 前端形态：纯静态 SPA（原生 ES Module + 一份 CSS），无打包、无运行时依赖；可单独运行 `demo-static`，也可配置为连接试用后端
-- 演示数据：浏览器 `localStorage`，键名 `gongye-demo-v1`，`STORE_VERSION = 10`
+- 站点形态：纯静态 SPA（原生 ES Module + 一份 CSS），无打包、无运行时依赖
+- 演示数据：浏览器 `localStorage`，键名 `gongye-demo-v1`，`STORE_VERSION = 8`
 
 ---
 
@@ -46,6 +48,7 @@ node scripts/qa-flow.mjs   # 核心交互
 | `src/state/actions.js` | 所有写操作与业务校验（权限、状态码） | 改规则时 |
 | `src/state/selectors.js` | 只读查询、搜索排序、圈/课程读模型 | 改搜索/展示逻辑时 |
 | `src/data/seed.js` | 演示数据（账号、课程、圈、帖子、资料） | 改演示内容时 |
+| `src/data/zju-courses-2026aw.js` | 浙大 2371 门课程名（生成文件，勿手改） | 用 `scripts/build-zju-catalog.mjs` 重新生成 |
 | `src/lib/format.js` | 学期、学校、资料类型、格式化 | 加枚举值时 |
 | `assets/css/tokens.css`、`assets/css/app.css` | 主题变量、全部样式（9.1/9.2 规则在文件末尾） | 改视觉时 |
 | `assets/` | Logo、头像、表情、逐日插画、演示图片 | 换素材时 |
@@ -73,12 +76,10 @@ node scripts/qa-flow.mjs   # 核心交互
 
 ## 4. 数据都在哪
 
-- `demo-static` 模式从 `src/data/seed.js` 生成演示数据，首次打开写入 `localStorage['gongye-demo-v1']`；这不适用于连接后端时的线上数据。
+- 线上/本地演示都从 `src/data/seed.js` 生成，首次打开写入 `localStorage['gongye-demo-v1']`。
 - 想重置演示数据：浏览器 DevTools → Application → Local Storage 删除该键，或把 `src/state/store.js` 的 `STORE_VERSION` +1。
-- `STORE_VERSION = 10` 会对版本 9 的本地演示库按固定 ID、标题和正文标记移除已确认的源码样例；JSON 试用后端沿用旧数据文件时，也会在首次启动执行同一清理并先备份，细节见 `server/MIGRATE_PILOT_DATA.md`。
 - 演示账号、密码、邀请码都在 `seed.js` 顶部和 `actions.js` 的 `DEMO_CODE` 里。
-- **静态演示没有真实后端**：该模式的账号、登录、发帖、上传都是本地模拟。`server/` 是独立的 Node 试用后端，不参与静态部署；旧版 `PILOT.md` 中的固定码和网络开放步骤仅供本机隔离验收，不可作为公网或真实用户的部署指南。
-- 已发布帖子、资料和圈内公开内容任何访问者都可浏览；登录资格不代表内容私密。当前线上状态应另行检查运行配置与 `/api/health`。
+- **没有真实后端**：登录、发帖、上传都是本地模拟。接真实后端看 `BACKEND_PLAN.md`；`server/` 只是内网试用的 Node 服务，不参与静态部署。
 
 ---
 
@@ -108,9 +109,9 @@ node scripts/qa-flow.mjs   # 核心交互
 ## 7. 已知限制 / 下一步
 
 - 没有真实后端：认证、数据库、对象存储、附件扫描都未接；`localStorage` 只适合演示与评审。
-- 课程只有名称维度，没有教学班、教师、学分；9.2 后这些维度已从圈上移除，不需要再补。
+- 浙大课程只有课程名，没有教学班、教师、学分；9.2 后这些维度已从圈上移除，不需要再补。
 - 浏览器自动化（`qa.mjs` / `qa-flow.mjs`）在本机沙箱未执行，360/390/430 三档视觉请在本机补跑一次。
-- 圈数量 = 课程数（6，不含「通用学习」）；新增课程时记得同时建圈，或让管理员在后台建。
+- 圈数量 = 课程数（2375，不含「通用学习」）；新增课程时记得同时建圈，或让管理员在后台建。
 
 ---
 

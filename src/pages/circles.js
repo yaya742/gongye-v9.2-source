@@ -6,7 +6,7 @@ import {
   postCard, resourceCard, emptyState, notice, signCard, weekIndexCard,
   pendingQuestionsCard, icon, avatar, authorLine
 } from '../components/ui.js';
-import { esc, timeAgo, BOARDS } from '../lib/format.js';
+import { esc, timeAgo, BOARDS, TERMS } from '../lib/format.js';
 
 function circleHref(path, query) {
   return href(path, query);
@@ -97,11 +97,11 @@ export function circles(ctx) {
   return `
   <div class="container">
     <div class="layout-3">
-      <aside class="rail rail-sticky circle-feed-rail" aria-label="课友圈导航">
+      <aside class="rail rail-sticky" aria-label="课友圈导航">
         <div class="rail-group">
           <div class="rail-title">我的课友圈</div>
           ${myCircleList}
-          <a class="rail-link rail-link-find-circles" href="${href('/find-circles')}">${icon('plus')}找课 / 加入圈子</a>
+          <a class="rail-link" href="${href('/find-circles')}">${icon('plus')}找课 / 加入圈子</a>
         </div>
         <div class="rail-sep"></div>
         <a class="rail-link" href="${circleHref('/circles', { mode: 'my' })}" ${mode === 'my' ? 'aria-current="page"' : ''}>${icon('home')}我的课友圈</a>
@@ -120,8 +120,12 @@ export function circles(ctx) {
           ${avatar(me, 'avatar')}
           <a class="grow secondary small" href="${href('/publish')}">发到我的课友圈：今天有什么想一起讨论？</a>
           <a class="icon-btn" href="${href('/publish')}" aria-label="发布">${icon('plus')}</a>
-        </div>` : ''}
+        </div>` : `<div class="card card-tight">
+          <div class="notice">${icon('lock', 'i-sm')}<span>游客现在可以浏览公开讨论。登录并验证邮箱后可以发帖、评论和收藏。</span></div>
+          <div class="row mt-3"><a class="btn btn-sm" href="${href('/login', { next: '/circles' })}">登录 / 注册</a></div>
+        </div>`}
 
+        <p class="gy-brand-line">世界很大，我们共读一页。</p>
         <div class="tabs" role="tablist">
           ${modeTabs.map((tab) => `<a class="tab" role="tab" aria-selected="${mode === tab.key}"
             href="${circleHref('/circles', { mode: tab.key })}">${esc(tab.label)}</a>`).join('')}
@@ -129,10 +133,7 @@ export function circles(ctx) {
             <a class="chip chip-sm ${sort === 'hot' ? 'is-active' : ''}" href="${circleHref('/circles', { mode, sort: sort === 'hot' ? '' : 'hot' })}">热门</a>` : ''}
         </div>
 
-        <div class="chips mb-3">${boardChips}
-          ${!me && mode !== 'my' ? `<button class="chip chip-sm circle-guest-help" type="button"
-            data-action="circle-guest-info" aria-label="游客可以做什么" title="游客可以做什么">${icon('question', 'i-sm')}</button>` : ''}
-        </div>
+        <div class="chips mb-3">${boardChips}</div>
 
         ${mode === 'my' && activeMine.length ? `<div class="chips mb-3">
           ${activeMine.map(({ circle }) => `<a class="chip chip-sm" href="${href(`/circles/${circle.id}`)}">${esc(S.circleShort(db, circle))}</a>`).join('')}
@@ -165,7 +166,6 @@ export function findCircles(ctx) {
   const qText = String(q.q || '').trim();
   const pageSize = 20;
   const page = Math.max(1, Number(q.page) || 1);
-  const activityOnly = !courseId && !qText;
 
   const courses = (db.courses || []).filter((c) => c.id !== 'c_general');
   // 课程有几千门，下拉只给当前筛选或前 60 个；完整检索走上面的「课程名」
@@ -174,20 +174,6 @@ export function findCircles(ctx) {
     : qText
       ? courses.filter((c) => c.name.toLowerCase().includes(qText.toLowerCase())).slice(0, 60)
       : courses.slice(0, 60);
-  const circleStats = new Map();
-  const statsFor = (id) => {
-    if (!circleStats.has(id)) circleStats.set(id, { members: 0, recent: null });
-    return circleStats.get(id);
-  };
-  (db.memberships || []).forEach((membership) => {
-    if (membership.status === 'active') statsFor(membership.circleId).members += 1;
-  });
-  (db.posts || []).forEach((post) => {
-    if (post.status !== 'published' || !post.circleId) return;
-    const stats = statsFor(post.circleId);
-    if (!stats.recent || new Date(post.publishedAt) > new Date(stats.recent.publishedAt)) stats.recent = post;
-  });
-
   let list = (db.circles || []).slice();
   if (courseId) list = list.filter((c) => c.courseId === courseId);
   if (qText) {
@@ -200,21 +186,20 @@ export function findCircles(ctx) {
   if (school) {
     list = list.filter((c) => (S.courseOf(db, c.courseId) || {}).school === school);
   }
-  if (activityOnly) {
-    list = list.filter((circle) => {
-      const stats = circleStats.get(circle.id);
-      return !!stats && (stats.members > 0 || !!stats.recent);
-    });
-  }
+  // 全校目录可查；无搜索时优先有真实资料/讨论的课程，不以空圈数量制造活跃。
+  const activity = new Map();
+  (db.posts || []).filter((p) => p.status === 'published').forEach((post) => {
+    if (post.circleId) activity.set(post.circleId, (activity.get(post.circleId) || 0) + 1);
+  });
+  const courseResources = new Map();
+  (db.resources || []).filter((r) => S.resourceEligibility(db, r).ok).forEach((resource) => {
+    courseResources.set(resource.courseId, (courseResources.get(resource.courseId) || 0) + 1);
+  });
   list.sort((a, b) => {
     if (a.status !== b.status) return a.status === 'active' ? -1 : 1;
-    const statsA = circleStats.get(a.id) || { members: 0, recent: null };
-    const statsB = circleStats.get(b.id) || { members: 0, recent: null };
-    if (statsA.members !== statsB.members) return statsB.members - statsA.members;
-    const recentA = statsA.recent ? new Date(statsA.recent.publishedAt).getTime() : 0;
-    const recentB = statsB.recent ? new Date(statsB.recent.publishedAt).getTime() : 0;
-    if (recentA !== recentB) return recentB - recentA;
-    return new Date(b.createdAt) - new Date(a.createdAt);
+    const aScore = (activity.get(a.id) || 0) + 2 * (courseResources.get(a.courseId) || 0);
+    const bScore = (activity.get(b.id) || 0) + 2 * (courseResources.get(b.courseId) || 0);
+    return bScore - aScore || S.circleShort(db, a).localeCompare(S.circleShort(db, b), 'zh');
   });
 
   const total = list.length;
@@ -224,11 +209,11 @@ export function findCircles(ctx) {
 
   const cards = visible.map((circle) => {
     const course = S.courseOf(db, circle.courseId);
-    const stats = circleStats.get(circle.id) || { members: 0, recent: null };
-    const members = stats.members;
+    const members = S.countMembers(db, circle.id);
     const joined = me && S.isActiveMember(db, me.id, circle.id);
     const removed = me && (S.membership(db, me.id, circle.id) || {}).status === 'removed';
-    const recent = stats.recent;
+    const recent = (db.posts || []).filter((p) => p.circleId === circle.id && p.status === 'published')
+      .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))[0];
 
     return `<article class="card">
       <div class="row-top">
@@ -243,8 +228,7 @@ export function findCircles(ctx) {
             ${circle.status === 'archived' ? '<span class="status-pill status-removed">已归档</span>' : ''}
           </div>
           ${recent ? `<p class="small secondary mt-2">最近：${esc(recent.title || '一条新讨论')} · ${esc(timeAgo(recent.publishedAt))}</p>`
-            : members ? '<p class="small muted mt-2">已有成员，可以开始讨论。</p>'
-              : '<p class="small muted mt-2">圈内还没有帖子，加入后可以从第一帖开始。</p>'}
+            : '<p class="small muted mt-2">圈内还没有帖子，加入后可以从第一帖开始。</p>'}
         </div>
       </div>
       <div class="row mt-4 wrap">
@@ -256,6 +240,9 @@ export function findCircles(ctx) {
             : circle.status === 'archived'
               ? '<span class="tiny muted">归档圈不接受新成员</span>'
               : `<button class="btn btn-sm" type="button" data-action="join-circle" data-circle="${esc(circle.id)}">加入这个课友圈</button>`}
+        ${circle.inviteCode
+          ? `<a class="act" href="${href('/invite/' + circle.inviteCode)}">${icon('share', 'i-sm')}邀请链接</a>`
+          : '<span class="act muted tiny">邀请码由管理员生成，暂不可分享</span>'}
       </div>
     </article>`;
   }).join('');
@@ -266,14 +253,14 @@ export function findCircles(ctx) {
       <nav class="crumbs" aria-label="面包屑"><a href="${href('/circles')}">课友圈</a><span>/</span><span>找课</span></nav>
       <div class="card mt-4">
         <h1>找到你的课程圈</h1>
-        <p class="secondary small mt-2">按课程名找到同学；默认优先显示已有成员或讨论的课友圈。</p>
+        <p class="secondary small mt-2">面向全校课程，一门课一个共用圈，跨年级沉淀经验；不是教务教学班。按课程名搜索，加入后可提问、纠错和分享。</p>
         <form class="mt-4" data-form="find-circles">
           <div class="form-row">
             <div class="field">
               <label for="find-school">学校</label>
               <select class="select" id="find-school" name="school">
                 <option value="">全部学校</option>
-                ${['示例大学', '通用·不限学校'].map((s) => `<option value="${esc(s)}" ${school === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+                ${['浙江大学', '通用·不限学校'].map((s) => `<option value="${esc(s)}" ${school === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
               </select>
             </div>
             <div class="field">
@@ -301,16 +288,14 @@ export function findCircles(ctx) {
       </div>
 
       <div class="toolbar mt-4">
-        <h2 style="font-size:16px">${activityOnly ? `有成员或讨论的课友圈（${total}）` : `找到 ${total} 个课友圈`}</h2>
+        <h2 style="font-size:16px">匹配到 ${total} 个课程圈</h2>
         <span class="grow"></span>
-        <span class="tiny muted">搜索课程名可查看未活跃的圈</span>
+        <span class="tiny muted">一门课一个圈；学期写在帖子和资料里</span>
       </div>
       ${total ? cards : `<div class="card">${emptyState({
         img: 'empty-search.svg',
-        title: activityOnly ? '暂时没有活跃的课友圈' : '还没有这门课的圈',
-        text: activityOnly
-          ? '搜索课程名可以查看尚未活跃的圈。'
-          : '课程目录由平台维护；如果课程存在但还没有圈，可以提交建圈申请。',
+        title: '还没有这门课的圈',
+        text: '课程目录由平台维护；如果课程存在但还没有圈，可以提交建圈申请。',
         actions: `<a class="btn btn-ghost btn-sm" href="${href('/find-circles')}">清除筛选</a>`
       })}</div>`}
       ${pageCount > 1 ? `<nav class="pager" aria-label="分页">
@@ -319,10 +304,9 @@ export function findCircles(ctx) {
         ${current < pageCount ? `<a class="btn btn-ghost btn-sm" href="${href('/find-circles', { ...q, page: current + 1 })}">下一页</a>` : ''}
       </nav>` : ''}
 
-      <details class="card mt-6 circle-help">
-        <summary>没有找到课程？申请建圈</summary>
-        <div class="mt-3">
-        <p class="small secondary mb-3">一门课一个圈。课程已在目录里但还没圈时，可以申请建圈。</p>
+      <section class="card mt-6">
+        <div class="card-title">目录中已有课程但缺少圈？申请补建</div>
+        <p class="small secondary mb-3">一门课一个圈。已有课程圈可直接加入，无需申请；缺圈时可申请补建。课程名称缺失或有误，可通过「社区规则与隐私说明」联系维护者。申请者不会自动获得管理权限。</p>
         <form data-form="application">
           <div class="field">
             <label for="ap-course">课程</label>
@@ -337,21 +321,24 @@ export function findCircles(ctx) {
           </div>
           <button class="btn" type="submit">提交申请</button>
         </form>
-        </div>
-      </details>
+      </section>
     </main>
 
     <aside class="rail">
-      <details class="card circle-help">
-        <summary>加入规则与公开范围</summary>
-        <div class="stack small secondary mt-3">
+      <section class="card">
+        <div class="card-title">加入后会发生什么</div>
+        <div class="stack small secondary">
           <p>· 圈内新帖出现在「我的课友圈」聚合流</p>
           <p>· 可以发帖、评论、纠错，收到回复消息</p>
           <p>· 成员名单不公开，也不会导出你的修课清单</p>
           <p>· 随时可以退出、静音或移到往期</p>
-        <p class="mt-3">已发布内容对访问者公开；加入课友圈只用于参与讨论，成员名单不公开。请勿发布隐私。</p>
         </div>
-      </details>
+      </section>
+      <section class="card">
+        <div class="card-title">公开范围</div>
+        <p class="small secondary">首版课友圈与已发布内容都公开可浏览；成员身份用于参与和首页订阅，不是保密保障。请不要发布不该公开的内容。</p>
+      </section>
+      ${signCard(ctx)}
     </aside>
   </div>`;
 }
@@ -372,18 +359,18 @@ export function circle(ctx) {
   const joined = !!membership && membership.status === 'active';
   const tab = ['discussion', 'week', 'resources'].includes(route.query.tab) ? route.query.tab : 'discussion';
   const board = route.query.board || '';
+  const term = TERMS.includes(route.query.term) ? route.query.term : '';
   const members = S.countMembers(db, circle.id);
   const archived = circle.status === 'archived';
 
   const pinned = circle.pinnedPostId ? S.postOf(db, circle.pinnedPostId) : null;
 
-  const baseQuery = { tab: tab === 'discussion' ? '' : tab, board };
+  const baseQuery = { tab: tab === 'discussion' ? '' : tab, board, term };
   const tabLink = (name) => href(`/circles/${circle.id}`, { ...baseQuery, tab: name === 'discussion' ? '' : name });
 
   let content = '';
   if (tab === 'resources') {
-    const items = S.searchResources(db, { courseId: circle.courseId, sort: 'recent' })
-      .items.filter((item) => item.post.circleId === circle.id);
+    const items = S.searchResources(db, { courseId: circle.courseId, sort: 'recent', term }).items;
     content = items.length
       ? items.map((item) => resourceCard(ctx, item)).join('')
       : `<div class="card">${emptyState({
@@ -395,7 +382,7 @@ export function circle(ctx) {
   } else {
     const feed = S.feedPosts(db, {
       meId: me ? me.id : null, mode: 'all', circleId: circle.id, board: board || null,
-      week: tab === 'week', limit: 20
+      week: tab === 'week', term, limit: 20
     });
     content = feed.items.length
       ? feed.items.map((post) => postCard(ctx, post)).join('')
@@ -461,7 +448,7 @@ export function circle(ctx) {
                    </button>
                    <button class="chip" type="button" data-action="leave-circle" data-circle="${esc(circle.id)}">退出圈子</button>`
                 : `<button class="btn btn-sm" type="button" data-action="join-circle" data-circle="${esc(circle.id)}">加入这个课友圈</button>`}
-            <button class="chip" type="button" data-action="share" data-path="/invite/${esc(circle.inviteCode)}">${icon('share', 'i-sm')}邀请课友</button>
+            ${circle.inviteCode ? `<button class="chip" type="button" data-action="share" data-path="/invite/${esc(circle.inviteCode)}">${icon('share', 'i-sm')}邀请课友</button>` : ''}
           </div>
         </section>
 
@@ -475,6 +462,12 @@ export function circle(ctx) {
           <a class="link small" href="${href(`/posts/${pinned.id}`)}">打开完整内容 →</a>
         </div>` : ''}
 
+        <div class="chips mb-3" aria-label="按学期筛选">
+          <a class="chip chip-sm ${!term ? 'is-active' : ''}" href="${href(`/circles/${circle.id}`, { ...baseQuery, term: '' })}">全部学期</a>
+          ${TERMS.slice(0, 7).map((value) => `<a class="chip chip-sm ${term === value ? 'is-active' : ''}" href="${href(`/circles/${circle.id}`, { ...baseQuery, term: value })}">${esc(value)}</a>`).join('')}
+          ${term && !TERMS.slice(0, 7).includes(term) ? `<span class="chip chip-sm is-active">${esc(term)}</span>` : ''}
+        </div>
+        <p class="tiny muted mb-3">不同学期、教材和教师的安排可能不同，请结合资料适用范围使用。资料页收录本课程的公开资料，不要求作者先入圈。</p>
         <div class="tabs" role="tablist">
           <a class="tab" role="tab" aria-selected="${tab === 'discussion'}" href="${tabLink('discussion')}">讨论</a>
           <a class="tab" role="tab" aria-selected="${tab === 'week'}" href="${tabLink('week')}">本周</a>
@@ -514,9 +507,7 @@ export function circle(ctx) {
 export function invite(ctx) {
   const { db, me, route } = ctx;
   const code = String(route.params.code || '').toUpperCase();
-  const primaryMatch = (db.circles || []).find((c) => String(c.inviteCode || '').toUpperCase() === code);
-  const alias = (db.circleInviteAliases || []).find((item) => String(item.code || '').toUpperCase() === code);
-  const circle = primaryMatch || (alias && (db.circles || []).find((item) => item.id === alias.circleId)) || null;
+  const circle = (db.circles || []).find((c) => String(c.inviteCode).toUpperCase() === code);
 
   if (!circle) {
     return `<div class="layout-1">${emptyState({
@@ -555,7 +546,7 @@ export function invite(ctx) {
             </div>
           </div>
         </div>
-        <p class="small secondary mt-4">课堂里没跟上的一步、整理好的笔记、作业中的尝试，都可以继续讨论。任何访问者都可浏览圈内已公开内容；这是公开的学习空间，不是本班或校内私密群。</p>
+        <p class="small secondary mt-4">课堂里没跟上的一步、整理好的笔记、作业中的尝试，都可以继续讨论。这是公开的学习空间，不是本班私密群。</p>
 
         <div class="row wrap mt-4">
           ${archived
@@ -585,7 +576,7 @@ export function invite(ctx) {
         <div class="stack small secondary">
           <p>· 这是「${esc(course ? course.name : '这门课')}」的课程圈，全课程共用一个</p>
           <p>· 9.2 起不再按教学班或教师分圈；学期写在帖子和资料里</p>
-          <p>· 任何访问者都可浏览圈内已公开内容；请不要发布隐私信息</p>
+          <p>· 圈内内容公开可见，请不要发布隐私信息</p>
         </div>
       </section>
     </main>

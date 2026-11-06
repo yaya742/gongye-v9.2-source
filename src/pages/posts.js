@@ -5,7 +5,7 @@ import * as S from '../state/selectors.js';
 import { DEMO_SAMPLE_FILES } from '../state/actions.js';
 import {
   postCard, emptyState, notice, signCard, icon, avatar, authorLine,
-  attachmentRow, commentList, commentForm, stickerPickerMarkup
+  attachmentRow, commentList, commentForm, stickerPickerMarkup, pdfUploadField, sourceRightsFields
 } from '../components/ui.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { stickerMarkup } from '../data/stickers.js';
@@ -189,12 +189,10 @@ export function compose(ctx) {
   const board = boardOf(ui.compose.board).key;
   const myCircles = S.myCircles(db, me.id).filter(({ circle }) => circle.status === 'active');
   const presetCircle = route.query.circle || '';
-  const files = ui.files || [];
-  const images = ui.images || [];
-  const imageTotalLimitLabel = ctx.config && ctx.config.mode === 'production' ? '512 KiB' : '800 KiB';
+  const production = ctx.config?.mode === 'production';
+  const images = production ? [] : ui.images || [];
   const courseList = (db.courses || []).filter((c) => c.id !== 'c_general');
-  const sampleOptions = DEMO_SAMPLE_FILES
-    .map((file, index) => `<option value="${index}">${esc(file.label)}</option>`).join('');
+  const uploadHtml = pdfUploadField(ctx, { samples: DEMO_SAMPLE_FILES });
 
   const previewHtml = ui.compose.preview
     ? `<div class="card card-tight mt-3">
@@ -208,38 +206,55 @@ export function compose(ctx) {
   <div class="layout-1">
     <nav class="crumbs" aria-label="面包屑"><a href="${href('/circles')}">课友圈</a><span>/</span><span>发布</span></nav>
     <div class="card mt-4">
-      <div class="row compose-heading">
-        <h1 class="grow">发布帖子</h1>
-        <button class="icon-btn" type="button" data-action="compose-info" aria-label="查看发布说明" title="发布说明">${icon('question')}</button>
-      </div>
+      <h1>发一篇学习帖子</h1>
+      <p class="secondary small mt-2">问题、笔记、心得，都可以从这里开始。发布后公开可见，不是本班私密群。</p>
 
       <form data-form="post" class="mt-4" novalidate>
         <div class="field">
-          <label for="compose-circle">发布到</label>
+          <label for="compose-circle">发布到 <span class="label-hint">圈内课程由圈决定，不能另选冲突课程</span></label>
           <select class="select" id="compose-circle" name="circleId">
             <option value="">不挂圈（公开学习内容）</option>
             ${myCircles.map(({ circle }) => `<option value="${esc(circle.id)}" ${presetCircle === circle.id ? 'selected' : ''}>${esc(S.circleLabel(db, circle))}</option>`).join('')}
           </select>
           ${!myCircles.length ? `<p class="field-help">你还没有加入任何课友圈。可以先发不挂圈的公开内容，或<a class="link" href="${href('/find-circles')}">去找课程圈</a>。</p>` : ''}
         </div>
-
         <div class="field">
-          <label>板块</label>
-          <div class="chips">
-            ${BOARDS.map((item) => `<button class="chip chip-sm ${board === item.key ? 'is-active' : ''}" type="button"
-              data-action="set-board" data-board="${esc(item.key)}" aria-pressed="${board === item.key}">
-              ${esc(item.label)}
-            </button>`).join('')}
+          <label for="compose-course">讨论课程 <span class="label-hint">${production ? '必选；发布到圈内时以圈内课程为准' : '可选'}</span></label>
+          <select class="select" id="compose-course" name="courseId">
+            <option value="">请选择课程</option>
+            ${courseList.map((course) => `<option value="${esc(course.id)}">${esc(course.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="field"><label for="compose-term">适用学期</label>
+            <select class="select" id="compose-term" name="postTerm"><option value="">不限学期</option>${TERMS.map((term) => `<option value="${esc(term)}">${esc(term)}</option>`).join('')}</select>
+          </div>
+          <div class="field"><label for="compose-chapter">章节 <span class="label-hint">选填</span></label>
+            <input class="input" id="compose-chapter" name="chapter" maxlength="120" placeholder="例如：第三章 · 多元函数微分">
           </div>
         </div>
 
         <div class="field">
-          <label for="compose-title">标题 <span class="label-hint">选填 · 最多 60 字</span></label>
+          <label>板块</label>
+          <div class="chips">
+            ${BOARDS.map((item) => `<button class="chip ${board === item.key ? 'is-active' : ''}" type="button"
+              data-action="set-board" data-board="${esc(item.key)}" aria-pressed="${board === item.key}">
+              <img src="assets/art/${item.file}.svg" width="18" height="18" alt="">${esc(item.label)}
+            </button>`).join('')}
+          </div>
+          <p class="field-help">${board === 'help' ? '写清你试过什么、卡在哪一步，比只给题目更容易得到帮助。'
+            : board === 'notes' ? '写清这份整理适合谁、覆盖哪些内容。'
+              : board === 'course' ? '想和同学讨论课程内容、学习安排还是章节难点？'
+                : '说说你怎么做、效果怎样，不保证对每个人都适用。'}</p>
+        </div>
+
+        <div class="field">
+          <label for="compose-title">标题 <span class="label-hint">选填，最多 60 字</span></label>
           <input class="input" id="compose-title" name="title" maxlength="60" placeholder="给这篇帖子起个名字">
         </div>
 
         <div class="field">
-          <label for="compose-body">正文 <span class="label-hint">必填 · 最多 20,000 字</span></label>
+          <label for="compose-body">正文 <span class="label-hint">必填，支持基础 Markdown（代码块、引用、列表、链接）</span></label>
           <textarea class="textarea" id="compose-body" name="body" rows="8" required
             data-count-for="compose-body" data-max="20000"
             placeholder="分享你想说的，也可以贴出尝试过的过程。"></textarea>
@@ -253,11 +268,11 @@ export function compose(ctx) {
         </div>
 
         <div class="field">
-          <label>图片 <span class="label-hint">最多 9 张</span></label>
-          <div class="row wrap">
+          <label>图片 ${production ? '' : '<span class="label-hint">最多 9 张</span>'}</label>
+          ${production ? '<p class="field-help">图片上传尚未开放，已禁用；请用文字描述或上传 PDF，不接受本地 blob / base64 图片。</p>' : `<div class="row wrap">
             <input type="file" accept="image/jpeg,image/png,image/webp" multiple data-upload="image">
-            <span class="tiny muted">单张 ≤ 10 MiB · 本帖合计 ≤ ${imageTotalLimitLabel}</span>
-          </div>
+            <span class="tiny muted">演示模式下图片仅保存在本机浏览器（单张 ≤ 800 KiB）。</span>
+          </div>`}
           ${images.length ? `<div class="photos">
             ${images.map((img, index) => `<span style="position:relative;display:inline-block">
               <img src="${esc(img.dataUrl)}" alt="${esc(img.name)}" style="height:120px;width:auto;border:1px solid var(--line);border-radius:4px">
@@ -267,26 +282,15 @@ export function compose(ctx) {
           </div>` : ''}
         </div>
 
-        <div class="field">
-          <label>PDF 示例附件 <span class="label-hint">最多 3 个</span></label>
-          <div class="row wrap">
-            <select class="select" data-file-picker style="max-width:320px">${sampleOptions}</select>
-            <button class="btn btn-ghost btn-sm" type="button" data-action="add-file">添加 PDF</button>
-          </div>
-          ${files.length
-            ? files.map((file, index) => `<div class="attachment">
-                <img src="assets/art/file-pdf.svg" alt="PDF" width="34" height="40">
-                <div class="grow">
-                  <div class="file-name">${esc(file.name)}</div>
-                  <div class="file-meta">PDF · ${file.pages} 页 · 演示文件</div>
-                </div>
-                <button class="btn btn-quiet btn-sm" type="button" data-action="remove-file" data-index="${index}">移除</button>
-              </div>`).join('')
-            : ''}
-        </div>
+        ${sourceRightsFields({ prefix: 'post-resource' })}
+        <label class="checkbox mb-3">
+          <input type="checkbox" name="original" required>
+          <span><b>文档来源</b>：我确认内容来源合法且有权分享，不含他人隐私或整本商业教材扫描件。请先勾选，再上传 PDF。</span>
+        </label>
+        ${uploadHtml}
 
         <div class="field">
-          <label for="compose-tags">知识标签 <span class="label-hint">最多 3 个</span></label>
+          <label for="compose-tags">知识标签 <span class="label-hint">最多 3 个，用逗号分隔</span></label>
           <input class="input" id="compose-tags" name="tags" placeholder="例如：递归，调试">
         </div>
 
@@ -297,9 +301,9 @@ export function compose(ctx) {
             <div class="form-row">
               <div class="field">
                 <label for="res-course2">资料所属课程</label>
-                <select class="select" id="res-course2" name="resourceCourse">
+                ${production ? '<p class="field-help">沿用上方选择的讨论课程；圈内发帖以该圈课程为准，一份资料只关联一门具体课程。</p>' : `<select class="select" id="res-course2" name="resourceCourse">
                   ${courseList.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
-                </select>
+                </select>`}
               </div>
               <div class="field">
                 <label for="res-type2">资料类型</label>
@@ -312,7 +316,7 @@ export function compose(ctx) {
               <div class="field">
                 <label for="res-school2">学校</label>
                 <select class="select" id="res-school2" name="school">
-                  ${SCHOOLS.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
+                  ${(production ? ['浙江大学'] : SCHOOLS).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
                 </select>
               </div>
               <div class="field">
@@ -337,15 +341,12 @@ export function compose(ctx) {
           </div>
         </details>
 
-        <label class="checkbox">
-          <input type="checkbox" name="original" required>
-          <span><b>文档来源</b>：我确认这份内容来源合法（非整本商业教材扫描件、不含他人隐私），且我有权分享。未勾选无法发布或上传。</span>
-        </label>
+        <p class="field-help">发布前请确认上方课程、来源与授权均填写准确。</p>
 
         <div class="row mt-6 wrap">
           <a class="link small" href="${href('/publish/resource')}">想独立分享资料？进入资料发布 →</a>
           <span class="grow"></span>
-          <button class="btn" type="submit">${icon('plus', 'i-sm')}发布帖子</button>
+          <button class="btn" type="submit" ${ui.uploading || ui.publishing ? 'disabled' : ''}>${icon('plus', 'i-sm')}${ui.uploading ? '附件检查中…' : ui.publishing ? '发布中…' : '发布帖子'}</button>
         </div>
       </form>
     </div>
@@ -395,6 +396,10 @@ export function postEdit(ctx) {
         <div class="field">
           <label for="edit-body">正文</label>
           <textarea class="textarea" id="edit-body" name="body" rows="10" ${archived ? 'disabled' : ''}>${esc(post.body)}</textarea>
+        </div>
+        <div class="form-row">
+          <div class="field"><label for="edit-term">适用学期（可留空）</label><input class="input" id="edit-term" name="postTerm" value="${esc(post.term || '')}" maxlength="60" ${archived ? 'disabled' : ''}></div>
+          <div class="field"><label for="edit-chapter">章节（选填）</label><input class="input" id="edit-chapter" name="chapter" value="${esc(post.chapter || '')}" maxlength="120" ${archived ? 'disabled' : ''}></div>
         </div>
         <div class="field">
           <label for="edit-tags">知识标签 <span class="label-hint">最多 3 个</span></label>

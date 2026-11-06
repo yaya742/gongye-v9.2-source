@@ -3,7 +3,7 @@
  * 生产环境需要把这些校验原样实现在可信后端（见 README）。
  */
 
-import { shanghaiDate, countChars, BOARDS, levelOf } from '../lib/format.js';
+import { shanghaiDate, countChars, BOARDS, levelOf, TERMS, RESOURCE_TYPES } from '../lib/format.js';
 import { GROWTH_RULES, effectiveTextLength, normalizeForDedupe } from '../data/growth.js';
 import { quoteOfDay, bookmarkOfDay } from '../data/quotes.js';
 import { isValidSticker } from '../data/stickers.js';
@@ -353,11 +353,19 @@ function validatePostInput(db, user, input) {
     courseId = circle.courseId;
   }
 
+  if (db.production && (!courseId || courseId === 'c_general' || !S.courseOf(db, courseId))) {
+    return fail('bad_course', '请选择帖子对应的具体课程；课程圈内会自动关联课程');
+  }
+  const term = String(input.term || (input.resource && input.resource.term) || '通用·不限学期').trim();
+  const chapter = String(input.chapter || '').trim();
+  if (term.length > 30 || chapter.length > 120) return fail('bad_context', '学期最多 30 字，章节最多 120 字');
+  if (db.production && !TERMS.includes(term)) return fail('bad_term', '请选择有效的适用学期');
+
   const images = (input.images || []).slice(0, 9);
   const attachmentInputs = (input.attachments || []).slice(0, 3);
   if ((input.attachments || []).length > 3) return fail('too_many_files', '最多 3 个 PDF 附件');
 
-  return { ok: true, data: { board, body, title, tags, circleId, courseId, images, attachmentInputs } };
+  return { ok: true, data: { board, body, title, tags, circleId, courseId, term, chapter, images, attachmentInputs } };
 }
 
 /**
@@ -371,7 +379,7 @@ export function createPost(db, input = {}, now = Date.now()) {
   const checked = validatePostInput(db, user, input);
   if (!checked.ok) return checked;
 
-  const { board, body, title, tags, circleId, courseId, images, attachmentInputs } = checked.data;
+  const { board, body, title, tags, circleId, courseId, term, chapter, images, attachmentInputs } = checked.data;
   const resourceInput = input.resource || null;
 
   if (resourceInput) {
@@ -394,6 +402,8 @@ export function createPost(db, input = {}, now = Date.now()) {
     board,
     circleId,
     courseId,
+    term,
+    chapter,
     title: title || null,
     body,
     stickerId: stickerId || null,
@@ -438,6 +448,8 @@ export function createPost(db, input = {}, now = Date.now()) {
       type: resourceInput.type,
       coverage: String(resourceInput.coverage || '').trim(),
       limitations: String(resourceInput.limitations || '').trim(),
+      source: String(resourceInput.source || '').trim().slice(0, 500),
+      rights: String(resourceInput.rights || '').trim(),
       indexEnabled: true,
       status: ready ? 'indexed' : 'processing',
       updatedAt: new Date(now).toISOString()
@@ -469,6 +481,19 @@ function validateResourceInput(db, resourceInput, attachmentInputs) {
   if (!resourceInput.school) return fail('bad_school', '请选择学校（可用「通用·不限学校」）');
   if (!resourceInput.term) return fail('bad_term', '请选择适用学期（可用「通用·不限学期」）');
   if (!resourceInput.type) return fail('bad_type', '请选择资料类型');
+  if (db.production) {
+    if (resourceInput.school !== '浙江大学') return fail('bad_school', '本平台只收录浙江大学课程资料');
+    if (!TERMS.includes(resourceInput.term)) return fail('bad_term', '请选择有效的适用学期');
+    if (!RESOURCE_TYPES.includes(resourceInput.type)) return fail('bad_type', '请选择有效的资料类型');
+    if (!['原创', '已授权', '公开许可'].includes(resourceInput.rights)) {
+      return fail('bad_rights', '请选择原创、已授权或公开许可，并确认拥有分享权利');
+    }
+    const source = String(resourceInput.source || '').trim();
+    if (source.length < 4 || source.length > 500) return fail('bad_source', '请用 4–500 字说明作者、出处或授权依据');
+    if (String(resourceInput.coverage || '').length > 2000 || String(resourceInput.limitations || '').length > 2000) {
+      return fail('bad_scope', '适用范围和未覆盖内容各最多 2000 字');
+    }
+  }
   if (countChars(resourceInput.coverage) < 4) {
     return fail('bad_coverage', '请写清适用范围（至少 4 个字符）');
   }
@@ -479,7 +504,7 @@ function validateResourceInput(db, resourceInput, attachmentInputs) {
   return ok();
 }
 
-export function updatePost(db, { postId, title, body, tags }, now = Date.now()) {
+export function updatePost(db, { postId, title, body, tags, term, chapter }, now = Date.now()) {
   const user = me(db);
   if (!user) return fail('login', '请先登录');
   const post = S.postOf(db, postId);
@@ -487,8 +512,8 @@ export function updatePost(db, { postId, title, body, tags }, now = Date.now()) 
   if (post.authorId !== user.id) return fail('forbidden', '只能编辑自己的帖子');
   if (post.status === 'removed') return fail('removed', '帖子已删除，不能编辑');
   if (post.circleId) {
-    const circle = S.circleOf(db, post.circleId);
-    if (circle && circle.status === 'archived') return fail('archived', '归档圈的内容不能编辑，但仍可删除');
+    const block = S.circleWriteBlock(db, user.id, post.circleId);
+    if (!block.ok) return fail(block.code, block.message);
   }
   const nextBody = String(body == null ? post.body : body).trim();
   if (!nextBody) return fail('empty_body', '正文不能为空');
@@ -497,6 +522,12 @@ export function updatePost(db, { postId, title, body, tags }, now = Date.now()) 
   if (nextTitle.length > 60) return fail('title_too_long', '标题最多 60 字符');
   const nextTags = tags ? Array.from(new Set(tags.map((t) => String(t).trim()).filter(Boolean))).slice(0, 3) : post.tags;
 
+  if (term !== undefined && (String(term).length > 30 || (db.production && !TERMS.includes(term)))) {
+    return fail('bad_term', '请选择有效的适用学期');
+  }
+  if (chapter !== undefined && String(chapter).length > 120) return fail('bad_context', '章节最多 120 字');
+  if (term !== undefined) post.term = String(term).trim();
+  if (chapter !== undefined) post.chapter = String(chapter).trim();
   post.body = nextBody;
   post.title = nextTitle || null;
   post.tags = nextTags;
@@ -935,6 +966,47 @@ export function submitApplication(db, { courseId, reason = '' }, now = Date.now(
   return ok('建圈申请已提交，等待管理员审核');
 }
 
+export function reviewApplication(db, { applicationId, approved, reason = '' }, now = Date.now()) {
+  const admin = me(db);
+  if (!admin || admin.role !== 'admin') return fail('forbidden', '只有管理员可以审核建圈申请');
+  const application = S.byId(db.applications, applicationId);
+  if (!application || application.state !== 'pending') return fail('not_found', '待审核申请不存在');
+  if (!String(reason).trim()) return fail('need_reason', '请填写审核理由');
+  let circle = S.circleOfCourse(db, application.courseId);
+  if (approved === true && !circle) {
+    const created = createCircle(db, { courseId: application.courseId }, now);
+    if (!created.ok) return created;
+    circle = created.data.circle;
+  }
+  application.state = approved === true ? 'approved' : 'rejected';
+  application.reviewerId = admin.id;
+  application.reviewedAt = new Date(now).toISOString();
+  application.reviewReason = String(reason).trim().slice(0, 500);
+  audit(db, admin.id, approved === true ? '批准建圈申请' : '拒绝建圈申请', application.id, application.reviewReason);
+  notifyUser(db, { userId: application.applicantId, actorId: null, type: 'system',
+    text: `你的建圈申请已${approved === true ? '通过' : '拒绝'}：${application.reviewReason}`,
+    createdAt: new Date(now).toISOString() });
+  return ok('已完成审核', { circleId: circle ? circle.id : null });
+}
+
+/** 通知静音由用户自己决定；发言限制仅可由管理员修改，退出重入也不清除。 */
+export function setCircleRestriction(db, { circleId, userId, restricted, reason = '' }, now = Date.now()) {
+  const admin = me(db);
+  if (!admin || admin.role !== 'admin') return fail('forbidden', '只有管理员可以修改发言限制');
+  const member = S.membership(db, userId, circleId);
+  if (!member) return fail('not_found', '该成员记录不存在');
+  if (!String(reason).trim()) return fail('need_reason', '请填写处理理由');
+  member.moderationMuted = restricted === true;
+  member.writeRestricted = restricted === true;
+  member.restrictionReason = String(reason).trim().slice(0, 500);
+  member.restrictedAt = new Date(now).toISOString();
+  audit(db, admin.id, restricted === true ? '限制圈内发言' : '解除圈内限制', `${circleId}/${userId}`, member.restrictionReason);
+  notifyUser(db, { userId, actorId: null, type: 'system',
+    text: `课程圈发言限制已${restricted === true ? '开启' : '解除'}：${member.restrictionReason}`,
+    createdAt: new Date(now).toISOString() });
+  return ok(restricted === true ? '已限制圈内发言' : '已解除发言限制');
+}
+
 /* ---------- 资料 ---------- */
 
 export function setResourceIndex(db, { resourceId, enabled }, now = Date.now()) {
@@ -1113,48 +1185,6 @@ export function markAllNotificationsRead(db, payload = {}, now = Date.now()) {
   return ok('全部标为已读');
 }
 
-/* ---------- 私信 ---------- */
-
-export function sendDirectMessage(db, { recipientId, body }, now = Date.now()) {
-  const sender = me(db);
-  if (!sender) return fail('login', '请先登录');
-  if (sender.status !== 'active') return fail('suspended', '账号已停用，不能发送私信');
-  if (!sender.verified) return fail('unverified', '验证邮箱后才能发送私信');
-
-  const recipient = S.userOf(db, String(recipientId || ''));
-  if (!recipient || recipient.status !== 'active') return fail('bad_recipient', '这个账号当前不可接收私信');
-  if (recipient.id === sender.id) return fail('self_message', '不能给自己发送私信');
-
-  const text = String(body || '').trim();
-  if (!text) return fail('empty_message', '私信内容不能为空');
-  if (text.length > 2000) return fail('message_too_long', '私信最多 2000 字符');
-
-  if (!Array.isArray(db.directMessages)) db.directMessages = [];
-  const message = {
-    id: newId('dm'), senderId: sender.id, recipientId: recipient.id,
-    body: text, createdAt: new Date(now).toISOString(), readAt: null
-  };
-  db.directMessages.push(message);
-  return ok('私信已发送', { messageId: message.id });
-}
-
-export function markDirectMessagesRead(db, { peerId }, now = Date.now()) {
-  const user = me(db);
-  if (!user) return fail('login', '请先登录');
-  const peer = S.userOf(db, String(peerId || ''));
-  if (!peer || peer.id === user.id) return fail('bad_recipient', '对话对象无效');
-
-  const stamp = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
-  let changed = 0;
-  (db.directMessages || []).forEach((message) => {
-    if (message.senderId === peer.id && message.recipientId === user.id && !message.readAt) {
-      message.readAt = stamp;
-      changed += 1;
-    }
-  });
-  return ok(changed ? '已标为已读' : '', { changed });
-}
-
 /* ---------- 举报与审核 ---------- */
 
 export function reportContent(db, { targetType, targetId, reason, detail = '' }, now = Date.now()) {
@@ -1261,7 +1291,11 @@ export function setUserStatus(db, { userId, status, reason = '' }, now = Date.no
   const target = S.userOf(db, userId);
   if (!target) return fail('not_found', '用户不存在');
   if (target.role === 'admin' && target.id !== user.id) return fail('forbidden', '不能封禁其他管理员');
+  if (db.production && target.id === user.id && status !== 'active') return fail('forbidden', '不能封禁当前管理员自身，请由另一位维护者处理');
   target.status = status === 'active' ? 'active' : 'suspended';
+  if (target.status !== 'active' && Array.isArray(db.sessions)) {
+    db.sessions = db.sessions.filter((session) => session.userId !== target.id);
+  }
   target.bannedAt = status === 'active' ? null : new Date(now).toISOString();
   target.banReason = status === 'active' ? null : (reason || '管理员操作');
   audit(db, user.id, status === 'active' ? '解封账号' : '封禁账号', `用户 ${userId}`, reason || '未填写原因');
@@ -1288,13 +1322,9 @@ export function createCircle(db, input = {}, now = Date.now()) {
   if (S.circleOfCourse(db, courseId)) return fail('duplicate_circle', '这门课已经有课友圈了，一门课只保留一个圈');
 
   let inviteCode = '';
-  const existingInviteCodes = new Set([
-    ...(db.circles || []).map((item) => String(item.inviteCode || '').trim().toUpperCase()),
-    ...(db.circleInviteAliases || []).map((item) => String(item.code || '').trim().toUpperCase())
-  ].filter(Boolean));
   do {
     inviteCode = `GY-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-  } while (existingInviteCodes.has(inviteCode));
+  } while ((db.circles || []).some((circle) => circle.inviteCode === inviteCode));
 
   const circle = {
     id: newId('ci'),

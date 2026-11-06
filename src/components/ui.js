@@ -53,13 +53,14 @@ export function attachmentRow(ctx, att, opts = {}) {
   const { db, me } = ctx;
   const post = S.postOf(db, att.postId);
   const resource = S.resourceForPost(db, att.postId);
-  const canDownload = att.status === 'ready' && att.path;
+  const production = ctx.config?.mode === 'production';
+  const canDownload = att.status === 'ready' && (production ? !!att.uploadId : !!att.path);
   const blocked = att.downloadBlocked;
   const metaBits = [
     'PDF',
     att.pages ? `${att.pages} 页` : null,
     att.sizeBytes ? formatBytes(att.sizeBytes) : null,
-    `v${att.version}`
+    att.version ? `v${att.version}` : null
   ].filter(Boolean);
 
   let actionHtml = '';
@@ -85,6 +86,49 @@ export function attachmentRow(ctx, att, opts = {}) {
       <div class="file-meta">${metaBits.join(' · ')}${att.changeNote ? ` · ${esc(att.changeNote)}` : ''} ${statusPill(att)}</div>
     </div>
     <div class="file-actions">${actionHtml}</div>
+  </div>`;
+}
+
+/* 资料页和帖子页共享同一条真实上传链；生产模式绝不显示样例选择器。 */
+export function pdfUploadField(ctx, { required = false, samples = [] } = {}) {
+  const production = ctx.config?.mode === 'production';
+  const ui = ctx.ui || {};
+  const files = ui.files || [];
+  const maxBytes = Math.min(20971520, Number(ctx.config?.filePolicy?.maxBytes) || 20971520);
+  const unavailable = production && ctx.config?.filePolicy?.uploadReady === false;
+  const busy = !!ui.uploading || !!ui.publishing;
+  return `<div class="field pdf-upload">
+    <label for="pdf-upload">PDF 附件 <span class="label-hint">${required ? '1–3 个' : '最多 3 个'} · 单个 ≤ ${formatBytes(maxBytes)}</span></label>
+    ${production ? `<input id="pdf-upload" type="file" accept="application/pdf" multiple data-upload="pdf" ${busy || unavailable || files.length >= 3 ? 'disabled' : ''} aria-describedby="pdf-upload-help">
+      <p id="pdf-upload-help" class="field-help">${unavailable
+        ? '上传服务暂不可用：文件扫描服务尚未配置或未就绪。不能上传或假装成功，请联系维护者。'
+        : '先勾选文档来源确认，再选择已有 PDF。文件由服务器检查，只有检查通过的上传才能发布。'}</p>`
+      : `<div class="row wrap"><select class="select" data-file-picker style="max-width:340px">${samples.map((file, index) => `<option value="${index}">${esc(file.label)}</option>`).join('')}</select>
+        <button class="btn btn-ghost btn-sm" type="button" data-action="add-file">添加 PDF</button></div>
+        <p class="field-help">独立本地演示只使用包内示例 PDF，不会真的上传文件。</p>`}
+    <p class="field-help upload-status" role="status" aria-live="polite">${ui.uploading ? `正在上传并检查 ${esc(ui.uploadName || 'PDF')}，暂不能发布…` : ''}</p>
+    ${ui.uploadError ? `<p class="field-error" role="alert">${esc(ui.uploadError)}</p>` : ''}
+    ${files.length ? files.map((file, index) => `<div class="attachment">
+      <img src="assets/art/file-pdf.svg" alt="PDF" width="34" height="40">
+      <div class="grow"><div class="file-name">${esc(file.name)}</div>
+        <div class="file-meta">PDF · ${file.pages ? `${esc(file.pages)} 页` : '页数待确认'} · ${formatBytes(file.sizeBytes)} · ${production ? '已通过服务器检查' : '演示文件'}</div></div>
+      <button class="btn btn-quiet btn-sm" type="button" data-action="remove-file" data-index="${index}" ${busy ? 'disabled' : ''}>移除</button>
+    </div>`).join('') : `<p class="field-help">${required ? '至少需要 1 个已通过检查的 PDF。' : '提问与讨论可以只发文字。'}</p>`}
+  </div>`;
+}
+
+export function sourceRightsFields({ prefix = 'resource', source = '', rights = '' } = {}) {
+  return `<div class="field">
+    <label for="${prefix}-source">资料来源 <span class="label-hint">说明作者、出处或授权依据，至少 4 字</span></label>
+    <textarea class="textarea" id="${prefix}-source" name="source" rows="2" minlength="4" maxlength="1000" placeholder="例如：本人整理的课程笔记；或原作者、公开链接与许可说明">${esc(source)}</textarea>
+  </div>
+  <div class="field">
+    <label for="${prefix}-rights">分享授权</label>
+    <select class="select" id="${prefix}-rights" name="rights">
+      <option value="">请选择授权类型</option>
+      ${['原创', '已授权', '公开许可'].map((value) => `<option value="${value}" ${rights === value ? 'selected' : ''}>${value}</option>`).join('')}
+    </select>
+    <p class="field-help">仅拥有文件不等于拥有传播权。教师课件、教材节选等也须说明授权，不上传整本商业教材。</p>
   </div>`;
 }
 
@@ -129,6 +173,8 @@ export function postCard(ctx, post, options = {}) {
     tagBits.push(...post.tags.map((t) => `<span class="tag-item">${esc(t)}</span>`));
   }
   if (course) tagBits.push(`<span class="tag-item">${esc(course.name)}</span>`);
+  if (post.term) tagBits.push(`<span class="tag-item">${esc(post.term)}</span>`);
+  if (post.chapter) tagBits.push(`<span class="tag-item">${esc(post.chapter)}</span>`);
   if (circle) tagBits.push('<span class="tag-item">课程圈</span>');
 
   return `

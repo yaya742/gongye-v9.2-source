@@ -10,16 +10,17 @@
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { promises as fsp, existsSync, lstatSync, readFileSync, mkdirSync, renameSync } from 'node:fs';
+import { promises as fsp, existsSync, readFileSync, mkdirSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createSeed } from '../src/data/seed.js';
-import { removeKnownDemoPosts, DEMO_POST_CLEANUP_VERSION } from '../src/data/demo-post-cleanup.js';
 import * as A from '../src/state/actions.js';
+import { publicState } from './view.mjs';
+import { servePublicStatic } from './production.mjs';
+export { publicState } from './view.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(HERE, '..');
-const APP_ROOT_REAL = await fsp.realpath(APP_ROOT).catch(() => APP_ROOT);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -40,106 +41,9 @@ const MIME = {
 
 const SESSION_COOKIE = 'gy_sid';
 const SESSION_DAYS = 7;
-const DEMO_ATTACHMENT_PATHS = new Set(A.DEMO_SAMPLE_FILES.map((file) => file.path));
-const PREFERRED_CIRCLE_IDS = Object.freeze({
-  c_calc: 'ci_calc_a',
-  c_la: 'ci_la_a',
-  c_py: 'ci_py_b',
-  c_ds: 'ci_ds_a',
-  c_prob: 'ci_prob',
-  c_phys: 'ci_phys'
-});
-// Only expose actions intended to be called by the browser. Internal helpers
-// such as finishAttachmentProcessing must never become public just because
-// they were exported from actions.js.
-const WRITE_ACTIONS = new Set([
-  'requestCode', 'verifyCode', 'quickLogin', 'logout',
-  'updateProfile', 'updatePrefs', 'createPost', 'updatePost',
-  'saveResourceDraft', 'clearResourceDraft', 'setResourceCourse',
-  'removePost', 'toggleReaction', 'toggleFollowUser', 'toggleFollowCourse',
-  'addComment', 'removeComment', 'acceptComment', 'unacceptComment',
-  'joinCircle', 'leaveCircle', 'setCircleFlag', 'markCircleSeen',
-  'submitApplication', 'setResourceIndex', 'downloadResource',
-  'claimDaily', 'sendGift', 'markNotificationRead', 'markAllNotificationsRead',
-  'sendDirectMessage', 'markDirectMessagesRead',
-  'reportContent', 'resolveReport', 'archiveCircle', 'setUserStatus',
-  'createCircle', 'setPostStatus', 'recordEvent'
-]);
-const PUBLIC_ACTIONS = new Set(['requestCode', 'verifyCode', 'cloudSignIn', 'recordEvent']);
-
-function canonicalCircleIds(circles) {
-  const groups = new Map();
-  for (const circle of circles || []) {
-    if (!circle || typeof circle.courseId !== 'string' || !circle.courseId) continue;
-    if (!groups.has(circle.courseId)) groups.set(circle.courseId, []);
-    groups.get(circle.courseId).push(circle);
-  }
-  const canonicalIds = new Map();
-  for (const [courseId, group] of groups) {
-    const preferredId = PREFERRED_CIRCLE_IDS[courseId] || null;
-    const sorted = [...group].sort((a, b) => {
-      const activeOrder = Number(b.status === 'active') - Number(a.status === 'active');
-      if (activeOrder) return activeOrder;
-      const preferredOrder = Number(b.id === preferredId) - Number(a.id === preferredId);
-      if (preferredOrder) return preferredOrder;
-      const aCreated = a.createdAt ? Date.parse(a.createdAt) : NaN;
-      const bCreated = b.createdAt ? Date.parse(b.createdAt) : NaN;
-      if (!Number.isNaN(aCreated) || !Number.isNaN(bCreated)) {
-        if (Number.isNaN(aCreated)) return 1;
-        if (Number.isNaN(bCreated)) return -1;
-        if (aCreated !== bCreated) return aCreated - bCreated;
-      }
-      const left = String(a.id || '');
-      const right = String(b.id || '');
-      return left < right ? -1 : left > right ? 1 : 0;
-    });
-    if (sorted[0] && sorted[0].id) canonicalIds.set(courseId, sorted[0].id);
-  }
-  return canonicalIds;
-}
-
-function normalizeOrigin(value) {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  try {
-    const url = new URL(value.trim());
-    if (!['http:', 'https:'].includes(url.protocol)
-      || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
-function requestOrigin(req) {
-  // Production proxies must overwrite these headers with the external request
-  // values. Direct/local requests fall back to the socket and Host header.
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const protocol = ['http', 'https'].includes(forwardedProto)
-    ? `${forwardedProto}:`
-    : (req.socket.encrypted ? 'https:' : 'http:');
-  const host = forwardedHost || String(req.headers.host || '').trim();
-  return host ? normalizeOrigin(`${protocol}//${host}`) : null;
-}
-
-function isSupportedDemoAttachmentPath(value) {
-  return typeof value === 'string' && DEMO_ATTACHMENT_PATHS.has(value);
-}
-
-function validatePilotCreatePostAttachments(payload) {
-  const attachments = payload.attachments || [];
-  if (!Array.isArray(attachments)) return '附件数据格式无效';
-  // Keep the established action response for this existing validation.
-  if (attachments.length > 3) return '';
-  for (const attachment of attachments) {
-    if (!attachment || typeof attachment !== 'object' || Array.isArray(attachment)) return '附件数据格式无效';
-    if (!isSupportedDemoAttachmentPath(attachment.path)) {
-      return '当前试用版只支持内置演示 PDF，暂不支持上传自选文件';
-    }
-    if (attachment.status === 'processing') return '当前试用版不支持真实文件处理';
-  }
-  return '';
-}
+const WRITE_ACTIONS = new Set(
+  Object.keys(A).filter((key) => typeof A[key] === 'function' && !['newId', 'finishAttachmentProcessing'].includes(key))
+);
 
 /* ---------- 白名单 ---------- */
 
@@ -190,23 +94,18 @@ export class JsonStore {
 
   async load() {
     if (existsSync(this.file)) {
-      let parsed = null;
       try {
-        parsed = JSON.parse(readFileSync(this.file, 'utf8'));
+        const parsed = JSON.parse(readFileSync(this.file, 'utf8'));
+        if (parsed && Array.isArray(parsed.posts)) {
+          this.data = parsed;
+          if (!Array.isArray(this.data.sessions)) this.data.sessions = [];
+          return this.data;
+        }
       } catch {
         // 文件损坏时保留旧文件并从种子重建
         const broken = `${this.file}.broken-${Date.now()}`;
         try { mkdirSync(path.dirname(this.file), { recursive: true }); } catch { /* ignore */ }
         try { renameSync(this.file, broken); } catch { /* ignore */ }
-      }
-      if (parsed && Array.isArray(parsed.posts)) {
-        this.data = parsed;
-        if (!Array.isArray(this.data.sessions)) this.data.sessions = [];
-        if (!this.data.demoPostCleanup
-          || this.data.demoPostCleanup.version !== DEMO_POST_CLEANUP_VERSION) {
-          await this.migrateDemoPostFixtures();
-        }
-        return this.data;
       }
     }
     this.data = createSeed(Date.now());
@@ -214,61 +113,6 @@ export class JsonStore {
     this.data.pilot = { createdAt: new Date().toISOString() };
     await this.save();
     return this.data;
-  }
-
-  async migrateDemoPostFixtures() {
-    const sourceStat = lstatSync(this.file);
-    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
-      throw new Error('[pilot] 样例帖子迁移拒绝处理非普通文件或硬链接数据文件；原数据未改动');
-    }
-
-    const originalBytes = await fsp.readFile(this.file);
-    const candidate = JSON.parse(originalBytes.toString('utf8'));
-    if (!Array.isArray(candidate.sessions)) candidate.sessions = [];
-    const now = Date.now();
-    const summary = removeKnownDemoPosts(candidate, {
-      now,
-      reason: '已确认的源码演示样例清理'
-    });
-    const backupPath = `${this.file}.pre-demo-post-cleanup-v${DEMO_POST_CLEANUP_VERSION}-${now}-${process.pid}.bak`;
-
-    // 用排他创建和私有权限保留逐字节一致的回滚副本。
-    const backupHandle = await fsp.open(backupPath, 'wx', 0o600);
-    try {
-      await backupHandle.writeFile(originalBytes);
-      await backupHandle.sync();
-    } finally {
-      await backupHandle.close();
-    }
-    const [currentBytes, backupBytes] = await Promise.all([
-      fsp.readFile(this.file),
-      fsp.readFile(backupPath)
-    ]);
-    if (!currentBytes.equals(originalBytes) || !backupBytes.equals(originalBytes)) {
-      await fsp.unlink(backupPath).catch(() => {});
-      throw new Error('[pilot] 样例帖子迁移备份校验失败；原数据未改动');
-    }
-
-    const preWriteBytes = await fsp.readFile(this.file);
-    if (!preWriteBytes.equals(originalBytes)) {
-      await fsp.unlink(backupPath).catch(() => {});
-      throw new Error('[pilot] 数据文件在迁移期间发生变化；原数据未改动');
-    }
-
-    this.data = candidate;
-    await this.save();
-    let persisted;
-    try {
-      persisted = JSON.parse(readFileSync(this.file, 'utf8'));
-    } catch {
-      throw new Error(`[pilot] 样例帖子迁移写入校验失败；备份保存在 ${backupPath}`);
-    }
-    if (!persisted.demoPostCleanup
-      || persisted.demoPostCleanup.version !== DEMO_POST_CLEANUP_VERSION) {
-      throw new Error(`[pilot] 样例帖子迁移未能持久化；备份保存在 ${backupPath}`);
-    }
-    console.log(`[pilot] 源码演示帖子迁移完成：移除 ${summary.removedPostIds.length} 条，保留 ${summary.skippedPostIds.length} 条不匹配或无法安全处理的记录`);
-    console.log(`[pilot] 迁移前数据备份：${backupPath}`);
   }
 
   async save() {
@@ -300,7 +144,7 @@ function parseCookies(header = '') {
     if (index < 0) return;
     const key = part.slice(0, index).trim();
     const value = part.slice(index + 1).trim();
-    if (key) out[key] = decodeURIComponent(value);
+    if (key) { try { out[key] = decodeURIComponent(value); } catch { /* invalid cookie is ignored */ } }
   });
   return out;
 }
@@ -338,66 +182,7 @@ function userFromRequest(db, req) {
   const session = (db.sessions || []).find((s) => s.tokenHash === hash);
   if (!session) return null;
   if (new Date(session.expiresAt).getTime() < Date.now()) return null;
-  return db.users.find((u) => u.id === session.userId) || null;
-}
-
-async function verifyCloudAccessToken(cloudConfig, accessToken) {
-  const token = String(accessToken || '').trim();
-  const endpointText = String((cloudConfig || {}).endpoint || '').trim().replace(/\/+$/, '');
-  const publishableKey = String((cloudConfig || {}).publishableKey || '').trim();
-  if (!token || token.length > 16_384 || /\s/.test(token)) return { ok: false, code: 'invalid' };
-  if (!endpointText || !publishableKey.startsWith('wbpk_')) return { ok: false, code: 'unavailable' };
-
-  let endpoint;
-  try {
-    endpoint = new URL(endpointText);
-  } catch {
-    return { ok: false, code: 'unavailable' };
-  }
-  const localHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(endpoint.hostname);
-  if ((endpoint.protocol !== 'https:' && !(localHost && endpoint.protocol === 'http:'))
-    || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
-    return { ok: false, code: 'unavailable' };
-  }
-
-  try {
-    const verifyUrl = `${endpointText}/.cloud/auth/v1/user/me`;
-    const response = await fetch(verifyUrl, {
-      method: 'GET',
-      redirect: 'error',
-      headers: {
-        authorization: `Bearer ${token}`,
-        'x-wb-webapp-access-key': publishableKey,
-        accept: 'application/json'
-      },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (response.status === 401 || response.status === 403) return { ok: false, code: 'invalid' };
-    if (!response.ok) return { ok: false, code: 'unavailable' };
-
-    const raw = await response.text();
-    if (Buffer.byteLength(raw, 'utf8') > 65_536) return { ok: false, code: 'invalid' };
-    let body;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      return { ok: false, code: 'invalid' };
-    }
-    const identity = body && typeof body === 'object'
-      ? (body.data && body.data.user) || body.data || body.user || body
-      : null;
-    if (!identity || typeof identity !== 'object'
-      || identity.is_anonymous === true || identity.scope === 'anonymous') {
-      return { ok: false, code: 'invalid' };
-    }
-    const email = String(identity.email || (identity.user_metadata || {}).email || '').trim().toLowerCase();
-    const userId = String(identity.id || identity.sub || identity.uid || '').trim();
-    if (!email || !userId) return { ok: false, code: 'invalid' };
-    return { ok: true, email, userId };
-  } catch {
-    // Never log or return the bearer token, provider response body, or config key.
-    return { ok: false, code: 'unavailable' };
-  }
+  return db.users.find((u) => u.id === session.userId && u.status === 'active' && u.verified === true) || null;
 }
 
 function revokeSession(db, req) {
@@ -409,154 +194,7 @@ function revokeSession(db, req) {
 
 /* ---------- 对外状态（脱敏） ---------- */
 
-const pickFields = (row, fields) => Object.fromEntries(
-  fields.filter((field) => Object.prototype.hasOwnProperty.call(row || {}, field))
-    .map((field) => [field, row[field]])
-);
-
-function sanitizePublicEvent(payload, db) {
-  const type = String((payload || {}).type || '');
-  const meta = (payload || {}).meta && typeof payload.meta === 'object' ? payload.meta : {};
-  if (type === 'resource_landing_view') {
-    const resourceId = String(meta.resourceId || '').slice(0, 120);
-    if (!(db.resources || []).some((resource) => resource.id === resourceId)) return null;
-    return { type, meta: { resourceId } };
-  }
-  if (type === 'invite_landing_view') {
-    const circleId = String(meta.circleId || '').slice(0, 120);
-    const code = String(meta.code || '').slice(0, 120);
-    const validInvite = (db.circles || []).some((circle) => circle.id === circleId && circle.inviteCode === code)
-      || (db.circleInviteAliases || []).some((alias) => alias.circleId === circleId && alias.code === code);
-    if (!validInvite) return null;
-    return { type, meta: { circleId, code } };
-  }
-  return null;
-}
-
-export function publicState(db, meId) {
-  const me = meId ? db.users.find((u) => u.id === meId) : null;
-  const isAdmin = me && me.role === 'admin';
-  const circles = db.circles || [];
-  const canonicalIds = canonicalCircleIds(circles);
-  const wallets = {};
-  if (meId && db.wallets && db.wallets[meId]) wallets[meId] = db.wallets[meId];
-
-  const posts = (db.posts || []).filter((post) => isAdmin || post.status === 'published');
-  const postIds = new Set(posts.map((post) => post.id));
-  const comments = (db.comments || []).filter((comment) => postIds.has(comment.postId)
-    && (isAdmin || !comment.status || comment.status === 'visible'));
-  const attachments = (db.attachments || []).filter((attachment) => postIds.has(attachment.postId))
-    .map((attachment) => ({
-      ...pickFields(attachment, [
-        'id', 'postId', 'kind', 'name', 'sizeBytes', 'pages', 'version', 'status', 'changeNote', 'demo'
-      ]),
-      // File paths can contain private storage keys. The client only needs a
-      // truthy marker for ready-file eligibility; downloads resolve by ID on the server.
-      path: isSupportedDemoAttachmentPath(attachment.path) ? 'available' : null
-    }));
-  const resources = (db.resources || []).filter((resource) => postIds.has(resource.postId)
-    && (resource.indexEnabled !== false || (posts.find((post) => post.id === resource.postId) || {}).authorId === meId));
-  const activeOtherMemberships = (db.memberships || [])
-    .filter((row) => row.userId === meId || row.status === 'active')
-    .map((row) => row.userId === meId
-      ? pickFields(row, ['userId', 'circleId', 'status', 'muted', 'shelved', 'joinedAt', 'lastSeenAt', 'writeRestricted'])
-      : { circleId: row.circleId, status: 'active' });
-  const reactions = (db.reactions || []).filter((row) => postIds.has(row.postId)).map((row) => ({
-    postId: row.postId,
-    kind: row.kind,
-    createdAt: row.createdAt,
-    ...(row.userId === meId ? { userId: row.userId } : {})
-  }));
-  const follows = (db.follows || []).map((row) => ({
-    targetType: row.targetType,
-    targetId: row.targetId,
-    createdAt: row.createdAt,
-    ...(row.followerId === meId ? { followerId: row.followerId } : {})
-  }));
-  const visibleGifts = (db.gifts || []).filter((gift) => gift.senderId === meId
-    || (gift.status === 'active' && postIds.has(gift.postId)));
-  const anonymousGifters = new Map();
-  const gifts = visibleGifts.map((gift) => {
-    if (gift.senderId === meId) return { ...gift };
-    const key = `${gift.postId}:${gift.senderId}`;
-    if (!anonymousGifters.has(key)) anonymousGifters.set(key, `anon_gifter_${anonymousGifters.size + 1}`);
-    return {
-      postId: gift.postId,
-      receiverId: gift.receiverId,
-      qty: gift.qty,
-      status: gift.status,
-      day: gift.day,
-      senderId: anonymousGifters.get(key)
-    };
-  });
-  const xpTotals = new Map();
-  for (const row of db.xp || []) {
-    if (row.userId === meId) continue;
-    xpTotals.set(row.userId, (xpTotals.get(row.userId) || 0) + (Number(row.delta) || 0));
-  }
-  const xp = [
-    ...[...xpTotals].map(([userId, delta]) => ({ userId, delta })),
-    ...(db.xp || []).filter((row) => row.userId === meId)
-  ];
-
-  return {
-    // Explicit projection: new/private database fields stay private by default.
-    session: meId ? { userId: meId } : null,
-    users: (db.users || []).map((user) => ({
-      ...pickFields(user, ['id', 'nickname', 'avatar', 'bio', 'role', 'status', 'joinedAt']),
-      email: user.id === meId ? user.email : '',
-      verified: user.id === meId && user.verified === true
-    })),
-    courses: (db.courses || []).map((course) => pickFields(course, ['id', 'school', 'name', 'code', 'category'])),
-    circles: (db.circles || []).map((circle) => pickFields(circle, [
-      'id', 'courseId', 'status', 'createdBy', 'inviteCode', 'createdAt', 'pinnedPostId'
-    ])),
-    circleInviteAliases: (db.circleInviteAliases || [])
-      .filter((alias) => {
-        if (!alias || typeof alias.code !== 'string' || !alias.code || typeof alias.circleId !== 'string') return false;
-        const target = circles.find((circle) => circle.id === alias.circleId);
-        return Boolean(target && canonicalIds.get(target.courseId) === target.id);
-      })
-      .map((alias) => pickFields(alias, ['code', 'circleId'])),
-    memberships: activeOtherMemberships,
-    posts: posts.map((post) => pickFields(post, [
-      'id', 'authorId', 'board', 'circleId', 'courseId', 'title', 'body', 'stickerId', 'images',
-      'attachmentIds', 'tags', 'status', 'publishedAt', 'editedAt', 'acceptedCommentId',
-      'contentUpdatedAt', 'createdAt', 'daily', 'minChars', ...(isAdmin ? ['moderateReason'] : [])
-    ])),
-    attachments,
-    resources: resources.map((resource) => pickFields(resource, [
-      'id', 'postId', 'title', 'courseId', 'school', 'term', 'type', 'coverage', 'limitations',
-      'indexEnabled', 'status', 'updatedAt', 'previews'
-    ])),
-    comments: comments.map((comment) => pickFields(comment, [
-      'id', 'postId', 'authorId', 'parentId', 'replyToUserId', 'body', 'stickerId', 'status', 'createdAt', 'editedAt'
-    ])),
-    reactions,
-    follows,
-    courseCollections: (db.courseCollections || []).filter((row) => postIds.has(row.postId))
-      .map((row) => pickFields(row, ['postId', 'courseId', 'authorId', 'createdAt', 'note'])),
-    wallets,
-    ledger: (db.ledger || []).filter((row) => row.userId === meId),
-    claims: (db.claims || []).filter((row) => row.userId === meId),
-    gifts,
-    xp,
-    growthDecisions: (db.growthDecisions || []).filter((row) => row.userId === meId),
-    notifications: (db.notifications || []).filter((row) => row.userId === meId),
-    directMessages: meId
-      ? (db.directMessages || [])
-        .filter((row) => row.senderId === meId || row.recipientId === meId)
-        .map((row) => pickFields(row, ['id', 'senderId', 'recipientId', 'body', 'createdAt', 'readAt']))
-      : [],
-    reports: isAdmin ? db.reports || [] : [],
-    audit: isAdmin ? db.audit || [] : [],
-    applications: isAdmin ? db.applications || [] : [],
-    events: isAdmin ? db.events || [] : [],
-    inviteVisits: isAdmin ? db.inviteVisits || [] : [],
-    prefs: meId ? { [meId]: (db.prefs && db.prefs[meId]) || {} } : {},
-    drafts: meId && db.drafts && db.drafts[meId] ? { [meId]: db.drafts[meId] } : {}
-  };
-}
+// The same explicit minimal projection as production; no db spread.
 
 /* ---------- HTTP 工具 ---------- */
 
@@ -609,45 +247,6 @@ const clearCookieHeader = (secure) => {
 
 /* ---------- 静态文件 ---------- */
 
-function isPrivateStaticPath(urlPath) {
-  let decoded;
-  try {
-    decoded = decodeURIComponent(urlPath.split('?')[0]);
-  } catch {
-    return true;
-  }
-  const segments = path.posix.normalize(decoded).split('/').filter(Boolean);
-  return segments.some((segment) => segment.toLowerCase() === 'server' || segment.startsWith('.'));
-}
-
-async function resolveStatic(urlPath) {
-  let decoded;
-  try {
-    decoded = decodeURIComponent(urlPath.split('?')[0]);
-  } catch {
-    return null;
-  }
-  if (isPrivateStaticPath(decoded)) return null;
-  const target = path.resolve(APP_ROOT, `.${path.posix.normalize(decoded)}`);
-  if (target !== APP_ROOT && !target.startsWith(APP_ROOT + path.sep)) return null;
-  try {
-    const realTarget = await fsp.realpath(target);
-    if (realTarget !== APP_ROOT_REAL && !realTarget.startsWith(APP_ROOT_REAL + path.sep)) return null;
-    const stat = await fsp.stat(realTarget);
-    if (stat.isFile()) return realTarget;
-    if (stat.isDirectory()) {
-      const index = path.join(realTarget, 'index.html');
-      const realIndex = await fsp.realpath(index).catch(() => null);
-      if (!realIndex || (realIndex !== APP_ROOT_REAL && !realIndex.startsWith(APP_ROOT_REAL + path.sep))) return null;
-      const indexStat = await fsp.stat(realIndex).catch(() => null);
-      if (indexStat && indexStat.isFile()) return realIndex;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
 function runtimeConfigScript(options) {
   const config = {
     mode: 'production',
@@ -675,13 +274,12 @@ export async function createPilotServer(options = {}) {
     options.allowedEmails || process.env.ALLOWED_EMAILS || '',
     options.allowedDomains || process.env.ALLOWED_DOMAINS || ''
   );
-  /* 云端登录（WorkBuddy 云服务邮箱验证码）
-   * requireCloudAuth=true 时，固定验证码 123456 的入口关闭，只能走 cloudSignIn；
-   * 前端已在云服务验过邮箱，这里只负责：白名单域名校验 + 账号落到本地 users 表 + 签发会话。 */
+  /* Legacy cloud mode is disabled: a browser-supplied email is never proof of ownership.
+   * requireCloudAuth only turns off this local demo's fixed-code login. */
   const requireCloudAuth = options.requireCloudAuth === undefined
     ? String(process.env.REQUIRE_CLOUD_AUTH || '') === '1'
     : !!options.requireCloudAuth;
-  const cloudConfig = options.cloud && options.cloud.endpoint ? options.cloud : null;
+  const cloudConfig = null;
   const adminEmails = new Set(
     [adminEmail, ...(Array.isArray(options.adminEmails) ? options.adminEmails : [])]
       .map((v) => String(v || '').trim().toLowerCase())
@@ -689,24 +287,21 @@ export async function createPilotServer(options = {}) {
   );
 
   const notice = options.notice || (requireCloudAuth
-    ? '内测：仅白名单邮箱可注册；已发布内容公开可浏览；请勿上传隐私或整本教材。'
-    : '仅名单内邮箱可注册；已发布内容公开可浏览；数据可能清空，请勿上传隐私或整本教材。');
+    ? '浙大内测：只对 @zju.edu.cn 邮箱开放；内容内测同学可见，请勿上传隐私或整本教材。'
+    : '只有名单内的邮箱能注册；数据随时可能清空，请勿上传隐私或整本教材。');
 
-  // Cross-origin access requires an explicit exact-origin allowlist. With no
-  // list, browser requests are limited to the request's same origin.
+  // 允许跨域的前端来源。为空或包含 '*' 时回显请求来源（仅适合内部试用）。
   const rawOrigins = options.allowedOrigins !== undefined
     ? options.allowedOrigins
     : String(process.env.ALLOWED_ORIGINS || '').split(',');
-  const configuredOriginValues = (Array.isArray(rawOrigins) ? rawOrigins : String(rawOrigins).split(','))
+  const allowedOrigins = (Array.isArray(rawOrigins) ? rawOrigins : String(rawOrigins).split(','))
     .map((item) => String(item || '').trim())
     .filter(Boolean);
-  const allowedOrigins = new Set(configuredOriginValues.map(normalizeOrigin).filter(Boolean));
-  const hasWildcardOrigin = configuredOriginValues.includes('*');
-  const originAllowed = (origin, req) => {
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) return false;
-    const sameOrigin = normalizedOrigin === requestOrigin(req);
-    return sameOrigin || allowedOrigins.has(normalizedOrigin);
+  const originAllowed = (origin) => {
+    if (!origin) return false;
+    if (!allowedOrigins.length) return true;
+    if (allowedOrigins.includes('*')) return true;
+    return allowedOrigins.includes(origin);
   };
 
   const store = new JsonStore(dataFile);
@@ -730,20 +325,22 @@ export async function createPilotServer(options = {}) {
     return bucket.count <= limit;
   };
 
-  const server = http.createServer(async (req, res) => {
+  // Serialize shared db.session even for legacy fixed-code local demos.
+  let requestQueue = Promise.resolve();
+  const handleRequest = async (req, res) => {
     const urlPath = (req.url || '/').split('?')[0];
     const origin = req.headers.origin;
     const ip = req.socket.remoteAddress || 'unknown';
 
     /* ---- 跨域头：允许静态站（不同域名）调用接口 ---- */
-    if (origin && originAllowed(origin, req)) {
-      res.setHeader('Access-Control-Allow-Origin', normalizeOrigin(origin));
+    if (origin && originAllowed(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
     }
 
     if (req.method === 'OPTIONS') {
-      if (origin && originAllowed(origin, req)) {
+      if (origin && originAllowed(origin)) {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization, x-requested-with');
         res.setHeader('Access-Control-Max-Age', '600');
@@ -816,7 +413,7 @@ export async function createPilotServer(options = {}) {
       }
 
       if (urlPath === '/api/action' && req.method === 'POST') {
-        if (origin && !originAllowed(origin, req)) {
+        if (origin && !originAllowed(origin)) {
           sendJson(res, 403, { error: { code: 'origin', message: '来源不被允许' } });
           return;
         }
@@ -841,117 +438,29 @@ export async function createPilotServer(options = {}) {
           return;
         }
 
-        if (name === 'createPost') {
-          const attachmentError = validatePilotCreatePostAttachments(payload);
-          if (attachmentError) {
-            sendJson(res, 400, { error: { code: 'bad_attachment', message: attachmentError } });
-            return;
-          }
-        }
-
-        let cloudIdentity = null;
-        if (name === 'cloudSignIn') {
-          if (!requireCloudAuth) {
-            sendJson(res, 403, { error: { code: 'disabled', message: '当前部署没有启用云端登录' } });
-            return;
-          }
-          cloudIdentity = await verifyCloudAccessToken(cloudConfig, payload.cloudAccessToken);
-          if (!cloudIdentity.ok) {
-            const unavailable = cloudIdentity.code === 'unavailable';
-            sendJson(res, unavailable ? 502 : 401, {
-              error: {
-                code: unavailable ? 'cloud_auth_unavailable' : 'cloud_auth_invalid',
-                message: unavailable ? '云端邮箱验证暂不可用，请稍后重试' : '云端邮箱验证已失效，请重新获取验证码'
-              }
-            });
-            return;
-          }
-          const requestedEmail = String(payload.email || '').trim().toLowerCase();
-          if (!requestedEmail || requestedEmail !== cloudIdentity.email) {
-            sendJson(res, 401, {
-              error: { code: 'cloud_identity_mismatch', message: '云端验证身份与登录邮箱不一致，请重新登录' }
-            });
-            return;
-          }
-          if (!allowlist.allowed(cloudIdentity.email)) {
-            sendJson(res, 403, {
-              error: {
-                code: 'not_allowed',
-                message: '只允许白名单邮箱注册，请联系管理员'
-              }
-            });
-            return;
-          }
-        }
-
         const me = userFromRequest(db, req);
-        if (!me && !PUBLIC_ACTIONS.has(name)) {
-          sendJson(res, 401, { error: { code: 'login', message: '请先登录' } });
-          return;
-        }
-        if (name === 'sendDirectMessage' && me
-          && !allowRequest(`direct-message:${me.id}`, 30, 60_000)) {
-          sendJson(res, 429, { error: { code: 'rate_limited', message: '私信发送太频繁，请稍后再试' } });
-          return;
-        }
         db.session = me ? { userId: me.id } : null;
 
         let result;
         let setCookie = null;
-        let actionPayload = payload;
 
         if (name === 'quickLogin') {
-          db.session = null;
           sendJson(res, 403, { error: { code: 'disabled', message: '试用版已关闭演示账号切换' } });
           return;
         }
 
         /* 开了云端登录后，固定验证码入口彻底关闭（前端不再调用，接口也不放行） */
         if (requireCloudAuth && (name === 'requestCode' || name === 'verifyCode')) {
-          db.session = null;
           sendJson(res, 403, {
-            error: { code: 'cloud_auth_required', message: '登录方式已改为邮箱验证码，请刷新页面重试' }
+            error: { code: 'cloud_auth_required', message: '登录方式已改为浙大邮箱验证码，请刷新页面重试' }
           });
           return;
         }
 
         if (name === 'cloudSignIn') {
-          const email = cloudIdentity.email;
-          // The provider's user/me endpoint verified this email server-side.
-          result = A.verifyCode(db, { email, code: A.DEMO_CODE });
-          if (result.ok) {
-            if (adminEmails.has(email)) {
-              const user = db.users.find((u) => String(u.email || '').toLowerCase() === email);
-              if (user) user.role = 'admin';
-            }
-            const user = db.users.find((u) => String(u.email || '').toLowerCase() === email);
-            if (user) {
-              const token = issueSession(db, user.id);
-              setCookie = cookieHeader(token, cookieSecure);
-              db.session = { userId: user.id };
-              result = {
-                ...result,
-                message: `已登录：${user.nickname}`,
-                data: { user: { id: user.id, nickname: user.nickname, role: user.role }, token }
-              };
-            }
-          }
           db.session = null;
-          await store.save();
-          sendJson(res, 200, {
-            result,
-            state: publicState(db, result && result.ok && result.data && result.data.user ? result.data.user.id : null)
-          }, setCookie ? { 'set-cookie': setCookie } : {});
+          sendJson(res, 403, { error: { code: 'disabled', message: '裸邮箱不构成身份凭证；请使用生产邮箱 OTP 登录' } });
           return;
-        }
-
-        if (name === 'recordEvent') {
-          actionPayload = sanitizePublicEvent(payload, db);
-          if (!actionPayload) {
-            db.session = null;
-            sendJson(res, 400, { error: { code: 'bad_event', message: '无效的浏览事件' } });
-            return;
-          }
         }
 
         if (name === 'requestCode' || name === 'verifyCode') {
@@ -990,15 +499,11 @@ export async function createPilotServer(options = {}) {
           result = A.logout(db);
           setCookie = clearCookieHeader(cookieSecure);
         } else {
-          result = A[name](db, actionPayload);
-        }
-
-        if (name === 'downloadResource' && result && result.ok
-          && !isSupportedDemoAttachmentPath(result.data && result.data.path)) {
-          result = { ok: false, code: 'not_ready', message: '当前试用版不支持下载此文件' };
+          result = A[name](db, payload);
         }
 
         db.session = null;
+        db.sessions = db.sessions.filter((s) => db.users.some((u) => u.id === s.userId && u.status === 'active'));
         await store.save();
 
         const effectiveMeId = name === 'logout'
@@ -1017,7 +522,7 @@ export async function createPilotServer(options = {}) {
         res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' });
         res.end(runtimeConfigScript({
           notice,
-          authMode: requireCloudAuth ? 'cloud' : 'demo-code',
+          authMode: requireCloudAuth ? 'disabled' : 'demo-code',
           cloud: cloudConfig
         }));
         return;
@@ -1029,40 +534,9 @@ export async function createPilotServer(options = {}) {
         return;
       }
 
-      if (isPrivateStaticPath(urlPath)) {
-        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-        res.end('404 Not Found');
-        return;
-      }
-
-      let file = await resolveStatic(urlPath);
-      if (!file && !path.extname(urlPath)) file = path.join(APP_ROOT, 'index.html');
-      if (!file) {
-        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end('404 Not Found');
-        return;
-      }
-
-      const ext = path.extname(file).toLowerCase();
-      const type = MIME[ext] || 'application/octet-stream';
-      const data = await fsp.readFile(file);
-      /* HTML/JS/CSS 一律 no-store：之前只给 no-cache 又没带 ETag，
-       * 开着旧标签页或经过代理的访客会一直跑旧模块（登录页还是固定码那版）。
-       * 只有图片/字体这类不会改的静态资源才允许缓存。 */
-      const cacheable = /\.(png|jpe?g|webp|gif|svg|ico|woff2?|ttf)$/i.test(ext);
-      /* 注意：writeHead 里不能出现值为 undefined 的头，否则 Node 直接抛
-       * ERR_HTTP_INVALID_HEADER_VALUE → 图片全变 500。所以按需拼装。 */
-      const headers = {
-        'content-type': type,
-        'cache-control': cacheable ? 'public, max-age=3600' : 'no-store, no-cache, must-revalidate',
-        'x-content-type-options': 'nosniff'
-      };
-      if (!cacheable) {
-        headers.pragma = 'no-cache';
-        headers.expires = '0';
-      }
-      res.writeHead(200, headers);
-      res.end(req.method === 'HEAD' ? undefined : data);
+      if (await servePublicStatic(req, res, urlPath)) return;
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('404 Not Found');
     } catch (error) {
       console.error('[pilot] 请求失败', urlPath, error);
       if (!res.headersSent) {
@@ -1071,6 +545,15 @@ export async function createPilotServer(options = {}) {
         res.end();
       }
     }
+  };
+  const server = http.createServer((req, res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    requestQueue = requestQueue.then(() => handleRequest(req, res)).catch(() => {
+      db.session = null;
+      if (!res.headersSent) sendJson(res, 500, { error: { code: 'server_error', message: '请求失败' } });
+      else res.end();
+    });
   });
 
   server.on('clientError', (error, socket) => {
@@ -1082,15 +565,28 @@ export async function createPilotServer(options = {}) {
     db,
     store,
     allowlist,
-    corsPolicy: { allowedOrigins: [...allowedOrigins], wildcardIgnored: hasWildcardOrigin },
-    loginMode: requireCloudAuth ? 'cloud' : 'demo-code',
+    loginMode: requireCloudAuth ? 'disabled' : 'demo-code',
     listen(port = 8787, host = '127.0.0.1') {
+      if (!['127.0.0.1', 'localhost', '::1'].includes(host)) return Promise.reject(new Error('pilot_is_local_only_use_production_for_deployment'));
       return new Promise((resolve) => {
         server.listen(port, host, () => resolve(server.address()));
       });
     },
     close() {
-      return new Promise((resolve) => server.close(() => resolve()));
+      return new Promise((resolve) => {
+        server.close(() => resolve());
+        server.closeIdleConnections?.();
+      });
     }
   };
+}
+
+// Explicit, local-only demo entry. Never selected by the production index.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const pilot = await createPilotServer();
+  const address = await pilot.listen(Number(process.env.PORT || 8788), '127.0.0.1');
+  console.warn(`[pilot] LOCAL DEMO ONLY: http://127.0.0.1:${address.port}; fixed code enabled for allowlisted demo accounts. Do not deploy.`);
+  const close = async () => { await pilot.close(); };
+  process.once('SIGINT', close);
+  process.once('SIGTERM', close);
 }

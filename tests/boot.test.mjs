@@ -55,6 +55,7 @@ const overlay = createElement('div');
 const body = createElement('body');
 
 globalThis.window = {
+  __GONGYE_CONFIG__: { mode: 'demo-static' },
   matchMedia: () => ({ matches: false }),
   addEventListener() {},
   scrollTo() {},

@@ -1,12 +1,14 @@
-/* 云服务邮箱验证码（校园邮箱内测）
+/* 云服务邮箱验证码（浙江大学内测专用）
  *
  * 只在 authMode === 'cloud' 时使用：
  *   1) sendCode(email)  → cloud.auth.signInWithOtp，平台把 6 位码发到邮箱
  *   2) verifyCode(code) → started.data.verify({ token })，拿到云端会话，证明这个邮箱是本人的
- *   3) 调用后端 cloudSignIn 换取本站会话（后端再校验一次白名单）
+ *   3) 调用后端 cloudSignIn 换取本站会话（后端再校验一次 @zju.edu.cn）
  *
  * 云端会话只用来证明"邮箱所有权"，不参与业务数据；业务仍然走 /api/*。
  */
+
+const ZJU_PATTERN = /@zju\.edu\.cn$/i;
 
 let sdkPromise = null;
 let client = null;
@@ -17,20 +19,8 @@ function config() {
   return all.cloud || null;
 }
 
-/* 允许的邮箱域名：在 window.__GONGYE_CONFIG__.cloud.emailDomains 里配置数组；
- * 不配置（或空数组）表示不限制域名，仍以邮箱验证码证明邮箱归属。 */
-function allowedDomains() {
-  const conf = config();
-  const list = conf && Array.isArray(conf.emailDomains) ? conf.emailDomains : [];
-  return list.map((item) => String(item || '').trim().toLowerCase().replace(/^@/, '')).filter(Boolean);
-}
-
-export function allowedEmail(email) {
-  const value = String(email || '').trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) return false;
-  const domains = allowedDomains();
-  if (!domains.length) return true;
-  return domains.some((domain) => value.endsWith(`@${domain}`));
+export function zjuEmail(email) {
+  return ZJU_PATTERN.test(String(email || '').trim());
 }
 
 function loadSdk() {
@@ -62,14 +52,11 @@ async function getClient() {
   return client;
 }
 
-/** 发码：只允许配置的邮箱域名，前端先挡一道（后端还会再挡一次） */
+/** 发码：只允许浙大邮箱，前端先挡一道（后端还会再挡一次） */
 export async function sendCode(email) {
   const value = String(email || '').trim().toLowerCase();
   if (!value.includes('@')) return { ok: false, message: '请填写邮箱' };
-  if (!allowedEmail(value)) {
-    const domains = allowedDomains();
-    return { ok: false, message: domains.length ? `只支持 ${domains.map((d) => '@' + d).join('、')} 邮箱` : '请填写有效邮箱' };
-  }
+  if (!zjuEmail(value)) return { ok: false, message: '只支持浙江大学邮箱（@zju.edu.cn）' };
 
   try {
     const cloud = await getClient();
@@ -99,24 +86,9 @@ export async function verifyCode(code) {
       return { ok: false, message: done.error.message || '验证码不正确或已过期' };
     }
     const email = (done.data && done.data.user && done.data.user.email) || pending.email;
-    const accessToken = String((done.data && done.data.accessToken) || '').trim();
-    if (!accessToken) {
-      pending = null;
-      return { ok: false, message: '云端验证没有返回有效会话，请重新获取验证码' };
-    }
-    const verified = {
-      email: String(email).trim().toLowerCase(),
-      userId: done.data && done.data.user && done.data.user.id,
-      // Only used once to prove identity to the site backend; never stored by the site client.
-      accessToken
-    };
+    const verified = { email: String(email).trim().toLowerCase(), userId: done.data && done.data.user && done.data.user.id };
     pending = null;
-    return {
-      ok: true,
-      email: verified.email,
-      cloudUserId: verified.userId,
-      accessToken: verified.accessToken
-    };
+    return { ok: true, email: verified.email, cloudUserId: verified.userId };
   } catch (error) {
     return { ok: false, message: error && error.message ? error.message : '验证失败' };
   }

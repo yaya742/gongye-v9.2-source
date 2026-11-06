@@ -2,4 +2,4 @@
 # 一行一个邮箱；以 @ 开头表示允许整个域名；# 开头为注释。
 # 例：
 # teammate@example.com
-# @example.com
+# @zju.edu.cn

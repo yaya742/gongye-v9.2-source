@@ -1,0 +1,27 @@
+# Caddy 反向代理：自动 HTTPS、同源转发，不缓存 API
+{$DOMAIN} {
+	encode zstd gzip
+
+	# 与后端 20 MiB 限制一致，提前拒绝超大请求体
+	request_body {
+		max_size 20MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Cookie 会话与 CRUD 必须同源：原样转发 Origin / Cookie / X-Requested-With
+	reverse_proxy app:8787 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
